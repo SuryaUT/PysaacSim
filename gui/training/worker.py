@@ -11,6 +11,7 @@ Emits:
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -41,6 +42,9 @@ class TrainingWorker(QThread):
                  device: str = "cpu",
                  n_envs: int = 1,
                  same_scene: bool = False,
+                 save_path: Optional[str] = None,
+                 save_every: int = 50_000,
+                 resume: bool = False,
                  parent=None):
         super().__init__(parent)
         self._walls = list(walls)
@@ -51,6 +55,9 @@ class TrainingWorker(QThread):
         self._device = device
         self._n_envs = max(1, int(n_envs))
         self._same_scene = bool(same_scene)
+        self._save_path = Path(save_path) if save_path else None
+        self._save_every = max(0, int(save_every))
+        self._resume = bool(resume)
         self._stop_flag = False
         self._pause_flag = False
         self._W: Optional[np.ndarray] = None
@@ -135,13 +142,26 @@ class TrainingWorker(QThread):
                       f"same_scene={self._same_scene} walls={len(walls)}")
 
         worker = self
+        save_path = self._save_path
+        save_every = self._save_every
 
         class ProgressCb(BaseCallback):
+            def __init__(self):
+                super().__init__()
+                self._next_save_step = save_every if (save_path and save_every > 0) else None
+
             def _on_step(self) -> bool:
                 while worker._pause_flag and not worker._stop_flag:
                     worker.msleep(50)
                 if worker._stop_flag:
                     return False
+                if self._next_save_step is not None and self.num_timesteps >= self._next_save_step:
+                    try:
+                        self.model.save(str(save_path))
+                        worker.log.emit(f"[checkpoint] saved @ {self.num_timesteps:,} steps → {save_path}.zip")
+                    except Exception as e:
+                        worker.log.emit(f"[checkpoint] save failed: {type(e).__name__}: {e}")
+                    self._next_save_step += save_every
                 return True
 
             def _on_rollout_end(self) -> None:
@@ -156,29 +176,63 @@ class TrainingWorker(QThread):
                 worker.iteration.emit(self.num_timesteps, mean_r)
 
         self.state_changed.emit("running")
-        self.log.emit(f"Constructing PPO (linear policy, total={self._total} steps)…")
-        # For an 8-input / 2-output linear policy CPU is typically faster —
-        # PCIe transfer per step dominates GPU compute. Configurable from GUI.
-        model = PPO(
-            "MlpPolicy", env,
-            n_steps=self._n_steps,
-            batch_size=min(64, self._n_steps),
-            learning_rate=self._lr,
-            policy_kwargs=dict(net_arch=[]),   # linear policy
-            device=self._device,
-            verbose=0,
-        )
-        self.log.emit(f"PPO built. device={model.device}. starting learn()…")
-        # Emit initial (random) weights so the UI has something to show.
+
+        # --- Load existing model or construct fresh ------------------------
+        model = None
+        if self._resume and self._save_path is not None:
+            zip_path = self._save_path.with_suffix(".zip")
+            if zip_path.exists():
+                try:
+                    self.log.emit(f"Resuming from {zip_path} …")
+                    model = PPO.load(str(self._save_path), env=env,
+                                     device=self._device)
+                    # Honor new LR from the UI even when resuming.
+                    model.learning_rate = self._lr
+                    model._setup_lr_schedule()
+                except Exception as e:
+                    self.log.emit(f"Resume failed ({type(e).__name__}: {e}); "
+                                  f"starting fresh.")
+                    model = None
+            else:
+                self.log.emit(f"No checkpoint at {zip_path}; starting fresh.")
+
+        if model is None:
+            self.log.emit(f"Constructing PPO (linear policy, total={self._total} steps)…")
+            # For an 8-input / 2-output linear policy CPU is typically faster —
+            # PCIe transfer per step dominates GPU compute. Configurable from GUI.
+            model = PPO(
+                "MlpPolicy", env,
+                n_steps=self._n_steps,
+                batch_size=min(64, self._n_steps),
+                learning_rate=self._lr,
+                policy_kwargs=dict(net_arch=[]),   # linear policy
+                device=self._device,
+                verbose=0,
+            )
+
+        if self._save_path is not None:
+            # Make sure the parent dir exists before the first checkpoint fires.
+            self._save_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self.log.emit(f"PPO ready. device={model.device}. starting learn()…")
+        # Emit initial weights so the UI has something to show.
         W, b = extract_weights(model)
         self._W, self._b = W, b
         self.weights.emit(W, b)
 
         try:
-            model.learn(total_timesteps=self._total, callback=ProgressCb(), progress_bar=False)
+            model.learn(total_timesteps=self._total, callback=ProgressCb(),
+                        progress_bar=False, reset_num_timesteps=not self._resume)
         except Exception as e:
             self.log.emit(f"Training error: {e}")
         finally:
+            # Final save regardless of clean finish vs. user stop.
+            if self._save_path is not None:
+                try:
+                    model.save(str(self._save_path))
+                    self.log.emit(f"[final] saved → {self._save_path}.zip")
+                except Exception as e:
+                    self.log.emit(f"[final] save failed: {type(e).__name__}: {e}")
             env.close()
             self.state_changed.emit("done" if not self._stop_flag else "stopped")
             self.log.emit("Training finished.")

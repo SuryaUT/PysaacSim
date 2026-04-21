@@ -8,11 +8,13 @@ import numpy as np
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QKeySequence, QShortcut
+from pathlib import Path
+
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton,
-    QScrollArea, QSlider, QSpinBox, QSplitter, QTextEdit, QVBoxLayout,
-    QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter, QTextEdit,
+    QVBoxLayout, QWidget,
 )
 
 from ...env.robot_env import RobotEnv, THROTTLE_MIN  # noqa: F401
@@ -317,6 +319,39 @@ class SimulationPage(QWidget):
         row3.addWidget(self.chk_same_scene)
         row3.addStretch(1)
         lay.addLayout(row3)
+
+        # ---- checkpoint / resume controls --------------------------------
+        save_row = QHBoxLayout()
+        save_row.addWidget(QLabel("Save path:"))
+        self.save_path = QLineEdit("checkpoints/wall_follower_ppo")
+        self.save_path.setToolTip(
+            "Base path (no extension). SB3 appends .zip. Checkpoints and "
+            "the final model both overwrite this file."
+        )
+        save_row.addWidget(self.save_path, 1)
+        btn_browse = QPushButton("Browse…")
+        btn_browse.clicked.connect(self._choose_save_path)
+        save_row.addWidget(btn_browse)
+        lay.addLayout(save_row)
+
+        save_row2 = QHBoxLayout()
+        save_row2.addWidget(QLabel("Save every:"))
+        self.save_every = QSpinBox()
+        self.save_every.setRange(0, 10_000_000)
+        self.save_every.setSingleStep(10_000)
+        self.save_every.setValue(50_000)
+        self.save_every.setGroupSeparatorShown(True)
+        self.save_every.setToolTip("Checkpoint interval in timesteps. 0 = only save at end.")
+        save_row2.addWidget(self.save_every)
+        save_row2.addWidget(QLabel("steps"))
+        save_row2.addStretch(1)
+        self.chk_resume = QCheckBox("Continue from existing model")
+        self.chk_resume.setToolTip(
+            "ON  — load the .zip at Save path (if it exists) and continue training.\n"
+            "OFF — ignore any existing file and start a fresh model (will overwrite)."
+        )
+        save_row2.addWidget(self.chk_resume)
+        lay.addLayout(save_row2)
 
         btn_row = QHBoxLayout()
         self.btn_train = QPushButton("Start Training")
@@ -663,6 +698,7 @@ class SimulationPage(QWidget):
             self.btn_train.setText("Start Training")
             return
         self.reward_curve.clear()
+        save_path = self.save_path.text().strip() or None
         self._worker = TrainingWorker(
             walls=list(self.state.walls),
             calibration=self.state.calibration,
@@ -671,6 +707,9 @@ class SimulationPage(QWidget):
             device=self.device.currentText(),
             n_envs=self.n_envs.value(),
             same_scene=self.chk_same_scene.isChecked(),
+            save_path=save_path,
+            save_every=self.save_every.value(),
+            resume=self.chk_resume.isChecked(),
         )
         self._worker.iteration.connect(self._on_train_iter)
         self._worker.weights.connect(self._on_train_weights)
@@ -711,3 +750,19 @@ class SimulationPage(QWidget):
             self.train_status.setText("No weights yet — start training first.")
             return
         self.train_status.setText("Weights are already live on RL robots.")
+
+    def _choose_save_path(self) -> None:
+        """Pick a .zip checkpoint path. We strip the extension so SB3 can
+        re-append it consistently when saving and loading."""
+        current = self.save_path.text().strip() or "checkpoints/wall_follower_ppo"
+        start = str(Path(current).with_suffix(".zip"))
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Model save path", start,
+            "PPO checkpoint (*.zip);;All files (*)"
+        )
+        if not path:
+            return
+        p = Path(path)
+        if p.suffix.lower() == ".zip":
+            p = p.with_suffix("")
+        self.save_path.setText(str(p))
