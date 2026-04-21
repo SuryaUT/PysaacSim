@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.dll
+*.dylib
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Training artifacts
+tb_logs/
+runs/
+checkpoints/
+*.zip
+*.pt
+*.pth
+wall_follower_ppo*
+
+# Temp compile dirs (c_bridge.py)
+pysim_cctrl_*/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# OS
+*.log

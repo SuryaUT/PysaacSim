@@ -1,0 +1,61 @@
+# Sensor calibration for ECE445M Lab 7 robot.
+# Edit values here to match real hardware behavior. No code changes or rebuilds
+# needed — RobotEnv reloads this file on construction.
+#
+# One knob per physical quantity. If you find a discrepancy between sim and
+# real robot, find the row here that best describes the mismatch.
+
+ir:
+  # Voltage response of the lab's analog front-end (Sharp GP2Y0A41SK0F + op-amp
+  # + voltage divider). v(d_cm) = curve_k / (d_cm + curve_c) for d >= peak_cm.
+  #
+  # Defaults make IRDistance_Convert(adc) return 2 x true_mm, matching the
+  # actual robot (firmware's /2 in DAS then recovers true mm). If the op-amp
+  # gain is changed in hardware, rescale curve_k:
+  #   - real robot behavior (2x):  curve_k = 12.79,  curve_c = 0.585
+  #   - bare Sharp datasheet:      curve_k = 25.58,  curve_c = 1.17  (1x out)
+  curve_k: 12.79
+  curve_c: 0.585
+
+  # Non-monotonic regime boundary. Below this, voltage rises linearly from
+  # peak_floor_v at contact up to the curve value at peak_cm.
+  peak_cm: 4.0
+  peak_floor_v: 0.4
+  v_clamp: 3.1          # ADC rails at Vref
+
+  # Reported-valid range. Outside this the reading is flagged invalid.
+  min_cm: 4.0
+  max_cm: 30.0
+
+  # Gaussian noise added before ADC conversion / after distance reporting.
+  distance_noise_std_cm: 0.4
+  voltage_noise_std: 0.02
+
+  adc_max_count: 4095
+  adc_vref: 3.3
+
+lidar:
+  max_cm: 800.0         # TF-Luna spec: 8 m max
+  noise_std_cm: 2.0
+  fov_rad: 0.0349       # ~2 deg (modeled as a single ray — FOV unused for now)
+  rate_hz: 100.0
+
+  # Post-raycast systematic-offset correction: reported = raw*scale + bias_cm.
+  # Leave at defaults unless you measure a real offset against a known target.
+  distance_scale: 1.0
+  distance_bias_cm: 0.0
+
+# Sensor placements in body frame: +x forward, +y left, origin at chassis
+# center. Lidars mounted 1.9 cm behind the front edge (chassis_len/2 - 1.9
+# = 15.24 - 1.9 = 13.34). IR-to-angled-lidar longitudinal offset = 15.875 cm,
+# matching the measured real robot.
+lidar_placements:
+  - {id: tfluna_center, x: 13.34, y:  0.00, theta:  0.0000}
+  - {id: tfluna_left,   x: 13.34, y:  7.62, theta:  0.7854}   #  +45 deg
+  - {id: tfluna_right,  x: 13.34, y: -7.62, theta: -0.7854}   #  -45 deg
+
+# IR sensors mounted 5 in (12.7 cm) from the rear → x = 15.24 - 12.7 - 5.08
+# = -2.54 cm, inset 3 in (7.62 cm) from centerline, pointing straight outward.
+ir_placements:
+  - {id: ir_left,  x: -2.54, y:  7.62, theta:  1.5708}        # +90 deg
+  - {id: ir_right, x: -2.54, y: -7.62, theta: -1.5708}        # -90 deg
