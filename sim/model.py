@@ -24,7 +24,7 @@ import numpy as np
 CAP_IR = 800              # mm
 CAP_TFLUNA = 1000         # mm
 CAP_THROTTLE = 9000       # PWM units
-CAP_STEERING = 30         # degrees
+CAP_STEERING = 35         # degrees (matches firmware Model.h)
 CAP_ANGLE = 64            # degrees
 CAP_ANGLE_POW = 6         # log2(CAP_ANGLE)
 CAP_DELTA_STEERING = 10   # degrees

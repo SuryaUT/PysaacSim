@@ -1,5 +1,118 @@
 # PySaacSim sim-to-real calibration pass
 
+## Implementation status (2026-04-22, Elijah_Branch)
+
+**Done, landed, tests green:** Phases 0a–0e, Phase 1 (calib package
+scaffold), Phase 2 (IR xlsx per-side + noise fits), Phase 3 (latency xcorr),
+CMA-ES dynamics replay infrastructure, report/diff/overlay, CLI, and 14
+pytest tests.
+
+**Partially done:** Phase 4 — the fit *runs* end-to-end but only a
+27-eval smoke-test has been executed (train loss 218k → holdout 239k on
+that tiny budget; numbers only meaningful at the planned ~500 evals).
+
+**Not yet done:** Phase 5 `--apply` (needs a longer CMA-ES run first and
+user sign-off on the yaml diff); Phase 6 DR handoff.
+
+### Where to pick up
+
+1. **Run the full 500-eval CMA-ES fit** (expected wall-clock ~30 min):
+   ```
+   cd /home/elijah/Development/ECE_445M
+   PySaacSim/.venv/bin/python PySaacSim/scripts/calibrate_from_log.py \
+     --ir-xlsx MSPM0LabProjects/RTOS_SensorBoard/IR_Calib.xlsx \
+     --steady-csv MSPM0LabProjects/IMU_steady_state.csv \
+     --drive-csvs MSPM0LabProjects/robot_clockwise.csv \
+                  MSPM0LabProjects/robot_counter_clockwise.csv \
+                  MSPM0LabProjects/more_CW.csv \
+                  MSPM0LabProjects/more_CCW.csv \
+     --max-evals 500
+   ```
+   Artifacts land in `PySaacSim/artifacts/calib_<ts>/`: `summary.txt`,
+   `diff.txt`, `proposed.yaml`, `dynamics.json`, `overlays/*.png`.
+
+2. **Look at the overlay PNGs first**. If gyro_z sign disagrees between CW
+   and CCW logs, stop and fix the sign-convention bug in `calib/replay.py`
+   (see Phase 4 pre-optimizer ablation, below). The 27-eval smoke test
+   already produced plausible overlays but didn't verify sign consistency
+   end-to-end.
+
+3. **Holdout separation.** If `loss_holdout > 2 × loss_train` per the
+   plan's pass criterion, stop and investigate (battery / surface drift,
+   not a code bug). The 27-eval smoke showed holdout/train ≈ 1.1 which is
+   fine; a real 500-eval fit should converge much tighter.
+
+4. **Apply** (with user confirmation):
+   ```
+   PySaacSim/.venv/bin/python PySaacSim/scripts/calibrate_from_log.py \
+     ... --apply
+   ```
+
+5. **Memory updates** (per the plan's "Post-exit-plan-mode housekeeping"
+   section at the bottom) — not done yet; the `memory/` dir exists but no
+   files written.
+
+### Key findings from sensor-only pass (already committed)
+
+- **IR per-side fits drift a lot from firmware** — new Left constants
+  `a=83326, b=-498, c=18` vs. firmware `a=137932, b=-859, c=32`. Old
+  firmware constants don't fit today's xlsx data (predict 150 mm at
+  adc=2023 where xlsx says 76 mm). Recommend flashing new constants to the
+  MSPM0 after we confirm a physical re-measurement isn't needed.
+- **IR_Calib.xlsx has no TFLuna sheet** (only inch / IR_Left_ADC /
+  IR_Right_ADC); `calib/tfluna_xlsx.py` is a graceful no-op. TFLuna
+  calibration stays at defaults (`scale=1, bias=0`) until a calibration
+  capture is added. TFLuna noise std fit from the steady capture
+  (`1.46 mm` on tf_right, the only stable channel).
+- **IMU bias** from steady capture: gyro_z=46 LSB (0.35 °/s), accel_x=264,
+  accel_y=−1074. The accel_y value is flagged as likely containing a
+  ~4° pitch contribution; `calib/imu_bias.py` emits a WARNING. The
+  "motors-off flat" capture is still outstanding.
+- **Latency**: steer → (−gyro_z) peaks at 160 ms, r=0.95 across all 4
+  drive logs. Throttle → accel_y peaks at 80 ms but weakly (r=0.21); log
+  conditions don't include many forward-accel bursts after cold start.
+
+### Files touched
+
+Sim:
+- `sim/constants.py` — D1/D2/D3 (servo 3120-centered, 1920..4320; max
+  speed 122 cm/s), new `SERVO_COUNTS_PER_53DEG`.
+- `sim/model.py` — D4 (`CAP_STEERING = 35`).
+- `sim/imu.py` — 44 Hz LPF + 4-sample rolling mean, bias-free.
+- `sim/sensors.py` — IR pipeline goes volts → ADC (+noise) → firmware
+  formula `a/(adc+b)+c` → saturate at 305 mm.
+- `sim/calibration.py` — new `IRSideCalibration`, `IMUCalibration`;
+  `ir_side(placement_id)`, `ir_firmware_convert`.
+- `config/calibration.yaml` — schema updated (per-side IR; `imu:` block).
+- `control/pd_baseline.py`, `control/base.py` — comment/constants refresh.
+- `gui/pages/robot_builder.py` — IR spinners updated for new fields.
+
+Calib (new package):
+- `calib/log_io.py`, `ir_xlsx.py`, `tfluna_xlsx.py`, `windows.py`,
+  `imu_bias.py`, `noise_fit.py`, `filters.py`, `replay.py`, `latency.py`,
+  `dynamics_fit.py`, `report.py`.
+- `scripts/calibrate_from_log.py` — one-shot CLI with `--apply` gate.
+
+Tests (new, 14 pass):
+- `tests/test_imu_filter.py` (3), `test_ir_fit_repro.py` (2),
+  `test_ir_pipeline.py` (7), `test_log_io.py` (2).
+
+### Caveats for the next session
+
+- **Dependencies:** the fit needs `openpyxl`, `scipy`, `cma` in the venv
+  (`PySaacSim/.venv/bin/pip install openpyxl scipy cma pytest`). The
+  repo's `requirements.txt` wasn't updated on purpose — those are
+  calib-only dependencies, not runtime ones.
+- **`Track_Of_Doom.csv`** in `MSPM0LabProjects/` is **out of scope** per
+  user instruction — do not pass it to the CLI.
+- **`calib/replay.py` mutates `sim.physics` module globals** via
+  `setattr` for the CMA-ES overrides. Safe because replay runs on the
+  main thread and restores on exit, but don't parallelize replay across
+  threads in-process without refactoring this.
+- **Matplotlib lazy-imports** — if the venv doesn't have it,
+  `plot_overlays` silently returns `[]`. `requirements.txt` already
+  includes it for the GUI.
+
 ## Context
 
 **Why this work exists.** PySaacSim is the training environment for an RL

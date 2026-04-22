@@ -9,7 +9,7 @@ behaves identically to the firmware running model bias = 32768.
 Where the on-device firmware and the Model_Interface spec disagree, this
 implementation follows the spec (which is the authoritative training target):
   - urgency  = (600-front) >> 4   (firmware uses >> 3)
-  - final clamp ±CAP_STEERING=30  (firmware clamps to ±53)
+  - final clamp ±CAP_STEERING=35  (firmware clamps to ±53)
   - diff steering threshold ±15   (firmware uses ±30)
 The firmware will be updated to match; sim-side weights trained against the
 spec will then transfer.
