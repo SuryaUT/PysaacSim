@@ -135,10 +135,8 @@ function setJobInFlight(inFlight) {
 
 // --- Public API (called from index.html onclick) ---------------------------
 window.startJob = async function startJob() {
-  const trackId = document.getElementById('f-track-id').value.trim();
-  if (!trackId) { pysaac.log('Enter a Track ID first', 'err'); return; }
-
-  const minutes = parseInt(document.getElementById('f-minutes').value, 10);
+  const trackId = "live";
+  const totalSteps = parseInt(document.getElementById('f-steps').value, 10);
   const nEnvs   = parseInt(document.getElementById('f-n-envs').value, 10);
   const lr      = parseFloat(document.getElementById('f-lr').value);
   const jwt     = getJWT();
@@ -146,16 +144,16 @@ window.startJob = async function startJob() {
   if (!jwt) { pysaac.log('No JWT — reload page and enter token', 'err'); return; }
 
   resetChart();
-  document.getElementById('eval-card').classList.remove('visible');
+  document.getElementById('eval-card')?.classList.remove('visible');
   setStats({ step: 0, reward: 0, fps: 0, state: 'submitting…' });
   setJobInFlight(true);
-  pysaac.log(`Submitting job: track=${trackId}, minutes=${minutes}, n_envs=${nEnvs}`);
+  pysaac.log(`Submitting job: track=live, steps=${totalSteps}, n_envs=${nEnvs}`);
 
   try {
     const r = await fetch('/jobs/train', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + jwt },
-      body: JSON.stringify({ track_id: trackId, minutes, n_envs: nEnvs, learning_rate: lr }),
+      body: JSON.stringify({ track_id: trackId, total_timesteps: totalSteps, n_envs: nEnvs, learning_rate: lr }),
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({ detail: r.statusText }));

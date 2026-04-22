@@ -128,3 +128,21 @@ class ControllerCompileBody(BaseModel):
 class ControllerCompileResponse(BaseModel):
     status: Literal["ok", "error"]
     error: Optional[str] = None
+
+class RobotSpawnBody(BaseModel):
+    x: float
+    y: float
+    theta: float = 0.0
+    controller_id: str = "web-manual"
+
+class RobotPatchBody(BaseModel):
+    x: Optional[float] = None
+    y: Optional[float] = None
+    theta: Optional[float] = None
+    controller_id: Optional[str] = None
+
+class PlaybackBody(BaseModel):
+    time_scale: Optional[float] = None
+    cars_interact: Optional[bool] = None
+    auto_respawn: Optional[bool] = None
+

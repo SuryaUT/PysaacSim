@@ -42,6 +42,14 @@ async def submit_job(
     storage = request.app.state.storage
     queue = request.app.state.jobs
 
+    if body.track_id == "live":
+        runner = request.app.state.sim_runner
+        body.track_id = "live_" + __import__("uuid").uuid4().hex[:8]
+        storage.save_track_meta(body.track_id, {
+            "track_id": body.track_id, "user_id": user.sub, "state": "confirmed"
+        })
+        storage.save_track_json(body.track_id, runner.snapshot())
+        
     meta = storage.track_meta(body.track_id)
     if meta is None:
         raise HTTPException(404, "track not found")

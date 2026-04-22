@@ -17,14 +17,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from ...env.robot_env import RobotEnv, THROTTLE_MIN  # noqa: F401
-from ...sim.constants import (
-    MAX_SPEED_CMS, MOTOR_PWM_MAX_COUNT, PHYSICS_DT_S, SERVO_CENTER_COUNT,
-    SERVO_MAX_COUNT, SERVO_MIN_COUNT, STEER_LIMIT_RAD,
-)
-from ...sim.geometry import chassis_segments
-from ...sim.physics import RobotState, apply_command, initial_robot, step_physics
-from ...sim.sensors import sample_sensors
+from ...sim.engine import SimEngine
+from ...sim.physics import RobotState, initial_robot
 from ..app_state import AppState, RobotSpec
 from ..canvas import TrackCanvas
 from ..training.linear_policy import (
@@ -38,46 +32,18 @@ CTRL_PERIOD_MS = 80.0
 PHYSICS_HZ = 60  # how often the GUI timer fires
 
 
-def _obs_from_sensors(sensors: dict, state: RobotState,
-                      lidar_max: float, ir_max: float) -> np.ndarray:
-    lc = sensors["lidar"]["center"]["distance_cm"] / lidar_max
-    ll = sensors["lidar"]["left"]["distance_cm"] / lidar_max
-    lr = sensors["lidar"]["right"]["distance_cm"] / lidar_max
-    il = sensors["ir"]["left"]["distance_cm"] / ir_max
-    ir = sensors["ir"]["right"]["distance_cm"] / ir_max
-    v = state.v / MAX_SPEED_CMS
-    om = max(-1.0, min(1.0, state.omega / 5.0))
-    st = state.steer_angle / STEER_LIMIT_RAD
-    return np.array([lc, ll, lr, il, ir, v, om, st], dtype=np.float32)
-
-
-def _action_to_command(servo_norm: float, tL_norm: float, tR_norm: float):
-    """Map RL action (3D: servo, throttle_L, throttle_R) → (duty_l, duty_r, servo_count).
-    Must stay in lockstep with RobotEnv.step()."""
-    servo_norm = max(-1.0, min(1.0, servo_norm))
-    tL_norm    = max(-1.0, min(1.0, tL_norm))
-    tR_norm    = max(-1.0, min(1.0, tR_norm))
-    if servo_norm >= 0:
-        servo = int(SERVO_CENTER_COUNT + servo_norm * (SERVO_MAX_COUNT - SERVO_CENTER_COUNT))
-    else:
-        servo = int(SERVO_CENTER_COUNT + servo_norm * (SERVO_CENTER_COUNT - SERVO_MIN_COUNT))
-    throttle_l = THROTTLE_MIN + (tL_norm + 1.0) * 0.5 * (1.0 - THROTTLE_MIN)
-    throttle_r = THROTTLE_MIN + (tR_norm + 1.0) * 0.5 * (1.0 - THROTTLE_MIN)
-    duty_l = int(throttle_l * MOTOR_PWM_MAX_COUNT)
-    duty_r = int(throttle_r * MOTOR_PWM_MAX_COUNT)
-    return duty_l, duty_r, servo
+# Removed old _obs_from_sensors and _action_to_command
 
 
 class SimulationPage(QWidget):
     def __init__(self, state: AppState):
         super().__init__()
         self.state = state
-        self._runtimes: dict[int, RobotState] = {}  # robot_id -> live state
+        self.engine = SimEngine()
         self._selected_robot: Optional[int] = None
         self._worker: Optional[TrainingWorker] = None
         self._W: Optional[np.ndarray] = None
         self._b: Optional[np.ndarray] = None
-        self._steps_since_ctrl: dict[int, float] = {}
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -401,7 +367,7 @@ class SimulationPage(QWidget):
                     self.robot_list.setCurrentRow(i)
                     break
         self.robot_list.blockSignals(False)
-        self._prune_runtimes()
+        self.engine.ensure_runtimes(self.state.robots)
 
     def _refresh_controller_choices(self) -> None:
         current = self.ctrl_combo.currentText() or "manual-drive"
@@ -464,9 +430,7 @@ class SimulationPage(QWidget):
         if rid == self._selected_robot:
             self._sync_selected_spinboxes()
         # Running state stays in sync: snap live runtime to the new spawn.
-        if rid in self._runtimes:
-            self._runtimes[rid] = initial_robot(x, y, theta)
-            self._steps_since_ctrl[rid] = 0.0
+        self.engine.force_robot_pose(rid, x, y, theta)
 
     def _on_sel_edited(self) -> None:
         if self._selected_robot is None:
@@ -483,11 +447,7 @@ class SimulationPage(QWidget):
         if item is not None:
             item.setPos(self.sel_x.value(), self.sel_y.value())
             item.setRotation(self.sel_theta.value())
-        if rid in self._runtimes:
-            self._runtimes[rid] = initial_robot(
-                self.sel_x.value(), self.sel_y.value(),
-                math.radians(self.sel_theta.value()))
-            self._steps_since_ctrl[rid] = 0.0
+        self.engine.force_robot_pose(rid, self.sel_x.value(), self.sel_y.value(), math.radians(self.sel_theta.value()))
 
     def _on_ring_angle(self, rid: int, theta: float) -> None:
         self.state.update_robot(rid, theta=theta)
@@ -495,11 +455,10 @@ class SimulationPage(QWidget):
         item = self.canvas._robot_items.get(rid)
         if item is not None:
             item.setRotation(math.degrees(theta))
-        if rid in self._runtimes:
+        if rid in self.engine.runtimes:
             spec = next((r for r in self.state.robots if r.id == rid), None)
             if spec is not None:
-                self._runtimes[rid] = initial_robot(spec.x, spec.y, theta)
-                self._steps_since_ctrl[rid] = 0.0
+                self.engine.force_robot_pose(rid, spec.x, spec.y, theta)
         self.canvas.sync_ring_to_selected()
 
     def _rotate_selected(self, direction: int) -> None:
@@ -518,9 +477,8 @@ class SimulationPage(QWidget):
         item = self.canvas._robot_items.get(spec.id)
         if item is not None:
             item.setRotation(math.degrees(new_theta))
-        if spec.id in self._runtimes:
-            self._runtimes[spec.id] = initial_robot(spec.x, spec.y, new_theta)
-            self._steps_since_ctrl[spec.id] = 0.0
+        if spec.id in self.engine.runtimes:
+            self.engine.force_robot_pose(spec.id, spec.x, spec.y, new_theta)
 
     # ---- sim loop --------------------------------------------------------
 
@@ -530,116 +488,41 @@ class SimulationPage(QWidget):
             self._running = False
             self.btn_play.setText("▶ Play")
             return
-        self._ensure_runtimes()
+        self.engine.ensure_runtimes(self.state.robots)
         self._timer.start(int(1000 / PHYSICS_HZ))
         self._running = True
         self.btn_play.setText("⏸ Pause")
 
     def _reset_runtimes(self) -> None:
-        self._runtimes = {}
-        self._steps_since_ctrl = {}
-        self._ensure_runtimes()
+        self.engine.reset_runtimes(self.state.robots)
         self.canvas._rebuild_robots()  # snap visuals back
         self._update_telemetry()
 
-    def _ensure_runtimes(self) -> None:
-        for r in self.state.robots:
-            if r.id not in self._runtimes:
-                self._runtimes[r.id] = initial_robot(r.x, r.y, r.theta)
-                self._steps_since_ctrl[r.id] = 0.0
-
-    def _prune_runtimes(self) -> None:
-        live_ids = {r.id for r in self.state.robots}
-        for rid in list(self._runtimes.keys()):
-            if rid not in live_ids:
-                self._runtimes.pop(rid, None)
-                self._steps_since_ctrl.pop(rid, None)
-
     def _tick(self) -> None:
-        self._ensure_runtimes()
-        walls = self.state.walls
-        cal = self.state.calibration
-        dims = self.state.dims
-        dt = PHYSICS_DT_S
-        # Simulate (1 / PHYSICS_HZ) seconds of wall-clock per tick, scaled.
-        sim_seconds = self._time_scale / PHYSICS_HZ
-        n_phys = max(1, int(round(sim_seconds / dt)))
+        self.engine.time_scale = self._time_scale
+        self.engine.cars_interact = self.chk_cars_interact.isChecked()
+        self.engine.auto_respawn = self.chk_respawn.isChecked()
+        self.engine.controllers = self.state.controllers
+        
+        # Pass linear policy evaluation if W and b are set
+        if self._W is not None and self._b is not None:
+            self.engine.rl_policy = lambda obs: policy_forward(self._W, self._b, obs)
+        else:
+            self.engine.rl_policy = None
 
-        cars_interact = self.chk_cars_interact.isChecked()
+        self.engine.tick_hz(PHYSICS_HZ, self.state.robots, self.state.walls, 
+                            self.state.dims, self.state.calibration)
+
+        # Push to canvas visuals.
         for r in self.state.robots:
-            state = self._runtimes[r.id]
-            # When cars_interact: other cars' chassis edges act as dynamic wall
-            # segments so this robot both SEES them (lidar/IR rays) and COLLIDES
-            # with them (inside step_physics). Otherwise ghost mode — each car
-            # is alone in its own perception of the track.
-            if cars_interact:
-                other_walls = self._other_car_segments(r.id, dims)
-                effective_walls = walls + other_walls
-            else:
-                effective_walls = walls
-            for _ in range(n_phys):
-                # Apply control at CTRL_PERIOD boundaries.
-                self._steps_since_ctrl[r.id] += dt * 1000.0
-                if self._steps_since_ctrl[r.id] >= CTRL_PERIOD_MS:
-                    self._steps_since_ctrl[r.id] = 0.0
-                    sensors = sample_sensors(effective_walls, state.pose, cal)
-                    duty_l, duty_r, servo = self._compute_command(r, state, sensors)
-                    apply_command(state, duty_l, duty_r, servo)
-                step_physics(state, effective_walls, dims.chassis_length_cm,
-                             dims.chassis_width_cm, dt)
-                if state.collided:
-                    break
-            # Auto-respawn RL robots on crash so the policy keeps running.
-            if (state.collided and r.controller_id == "rl"
-                    and self.chk_respawn.isChecked()):
-                self._runtimes[r.id] = initial_robot(r.x, r.y, r.theta)
-                self._steps_since_ctrl[r.id] = 0.0
-                state = self._runtimes[r.id]
-            # Push to canvas visuals.
+            state = self.engine.runtimes.get(r.id)
+            if state is None: continue
             item = self.canvas._robot_items.get(r.id)
             if item is not None:
                 item.setPos(state.pose.x, state.pose.y)
                 item.setRotation(math.degrees(state.pose.theta))
         self.canvas.sync_ring_to_selected()
         self._update_telemetry()
-
-    def _other_car_segments(self, me_id: int, dims) -> list:
-        """Chassis segments of every other live robot, in world frame.
-        These become obstacles for this robot's sensors and physics."""
-        out = []
-        for other in self.state.robots:
-            if other.id == me_id:
-                continue
-            rt = self._runtimes.get(other.id)
-            if rt is None:
-                continue
-            pose = (rt.pose.x, rt.pose.y, rt.pose.theta)
-            out.extend(chassis_segments(pose, dims.chassis_length_cm,
-                                        dims.chassis_width_cm))
-        return out
-
-    def _compute_command(self, spec: RobotSpec, state: RobotState, sensors: dict):
-        """Returns (duty_l, duty_r, servo_count) — differential drive."""
-        cid = spec.controller_id
-        if cid == "manual-stop":
-            return 0, 0, SERVO_CENTER_COUNT
-        if cid == "manual-drive":
-            return 9000, 9000, SERVO_CENTER_COUNT
-        if cid == "rl":
-            if self._W is None or self._b is None:
-                return 0, 0, SERVO_CENTER_COUNT
-            obs = _obs_from_sensors(sensors, state,
-                                    self.state.calibration.lidar.max_cm,
-                                    self.state.calibration.ir.max_cm)
-            action = policy_forward(self._W, self._b, obs)
-            return _action_to_command(float(action[0]), float(action[1]),
-                                      float(action[2]))
-        # Named C/Python controller (e.g. pd_controller.c) — already differential.
-        ctrl = self.state.controllers.get(cid)
-        if ctrl is None:
-            return 0, 0, SERVO_CENTER_COUNT
-        cmd = ctrl.tick(sensors, 0.0)
-        return cmd.duty_l, cmd.duty_r, cmd.servo
 
     def _update_telemetry(self) -> None:
         if self._selected_robot is None:
@@ -649,7 +532,7 @@ class SimulationPage(QWidget):
         if spec is None:
             self.telemetry.setPlainText("(selection invalid)")
             return
-        state = self._runtimes.get(self._selected_robot)
+        state = self.engine.runtimes.get(self._selected_robot)
         from ...sim.physics import Pose
         pose = state.pose if state is not None else Pose(spec.x, spec.y, spec.theta)
         v    = state.v if state is not None else 0.0
@@ -657,12 +540,9 @@ class SimulationPage(QWidget):
         steer = state.steer_angle if state is not None else 0.0
         collided = state.collided if state is not None else False
         try:
-            if self.chk_cars_interact.isChecked():
-                other_walls = self._other_car_segments(spec.id, self.state.dims)
-                eff_walls = self.state.walls + other_walls
-            else:
-                eff_walls = self.state.walls
-            sensors = sample_sensors(eff_walls, pose, self.state.calibration)
+            sensors = self.engine.last_sensors.get(spec.id, {})
+            if not sensors:
+                return # No telemetry yet
         except Exception as e:
             self.telemetry.setPlainText(f"(sensor sample failed: {e})")
             return

@@ -3,147 +3,261 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PysaacRC</title>
-  <link rel="stylesheet" href="style.css" />
+  <title>PySaac Sim</title>
+  <link rel="stylesheet" href="style.css?v=3" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 </head>
 <body>
 <div id="app">
 
-  <!-- header / tab bar -->
   <div id="header">
-    <h1>PysaacRC</h1>
-    <button class="tab-btn active" id="tab-sim"    onclick="setTab('sim')">Sim ▶</button>
-    <button class="tab-btn"        id="tab-train"  onclick="setTab('train')">Train ▶</button>
-    <button class="tab-btn"        id="tab-controller" onclick="setTab('controller')">Controller ⚙</button>
+    <button class="tab-btn active" id="tab-sim" onclick="setTab('sim')">Simulation / Train</button>
+    <button class="tab-btn" id="tab-track" onclick="setTab('track')">Track Builder</button>
+    <button class="tab-btn" id="tab-robot" onclick="setTab('robot')">Robot</button>
+    <button class="tab-btn" id="tab-controller" onclick="setTab('controller')">Controller</button>
     <span id="status-dot" title="WS status"></span>
     <span id="status-label">disconnected</span>
   </div>
 
-  <!-- main split: canvas | train | controller panel -->
   <div id="main">
-    <!-- Sim canvas -->
-    <div id="sim-panel">
-      <div id="sim-canvas-wrap">
+    
+    <!-- Simulation / Train Tab -->
+    <div id="sim-panel" style="flex:1; display:flex;">
+      <div id="sim-canvas-wrap" style="flex:1;">
         <canvas id="sim-canvas"></canvas>
       </div>
-      <div id="sim-controls">
-        <span class="ctrl-label">WASD/arrows: drive</span>
-        <span class="ctrl-label" style="margin-left:auto">v</span>
-        <span class="ctrl-val" id="ctrl-v">—</span>
-        <span class="ctrl-label">steer</span>
-        <span class="ctrl-val" id="ctrl-steer">—</span>
-        <span class="ctrl-label" id="sim-collided" style="color:var(--red);display:none">COLLISION</span>
+      <div class="splitter-h" id="split-sim"></div>
+      <div id="sim-sidebar" style="width: 350px; overflow-y:auto; padding:0 8px; flex-shrink:0;">
+        
+        <div class="group-box">
+          <div class="gb-title">Robots</div>
+          <div style="font-size:10px; color:#666; margin-bottom:4px;">Click empty track to add &middot; drag to move &middot; right-click to rotate/delete</div>
+          <select size="5" style="width:100%; height:80px; margin-bottom:4px;" id="sim-robot-list"></select>
+          <div class="row">
+            <span style="font-size:11px;">Controller:</span>
+            <select id="sim-robot-ctrl" style="flex:1;"><option>web-manual</option><option>rl</option></select>
+            <button class="btn" id="btn-sim-clear">Clear all</button>
+          </div>
+        </div>
+
+        <div class="group-box">
+          <div class="gb-title">Selected robot &mdash; position _heading</div>
+          <div style="font-size:10px; color:#666; margin-bottom:4px;">Drag on empty track to place with heading &middot; press R to rotate clockwise, Shift+R counter-clockwise</div>
+          <div class="row">
+            <div class="col" style="flex:1;"><span style="font-size:10px;">x</span><input type="number" id="sim-sel-x" value="0.0" step="0.1"></div>
+            <div class="col" style="flex:1;"><span style="font-size:10px;">y</span><input type="number" id="sim-sel-y" value="0.0" step="0.1"></div>
+            <div class="col" style="flex:1;"><span style="font-size:10px;">&theta;</span><input type="number" id="sim-sel-th" value="0" step="1"></div>
+          </div>
+        </div>
+
+        <div class="group-box">
+          <div class="gb-title">Playback</div>
+          <div class="row" style="justify-content:center;">
+            <button class="btn" id="btn-sim-play" style="width:100px;">&#10074;&#10074; Pause</button>
+            <button class="btn" id="btn-sim-reset" style="width:100px;">Reset</button>
+          </div>
+          <div class="row" style="margin-top:6px;">
+            <span style="font-size:11px;">Speed:</span>
+            <input type="range" id="sim-speed" min="0.1" max="4.0" step="0.1" value="1.0" style="flex:1;">
+            <span id="sim-speed-lbl" style="font-size:11px;">1.0x</span>
+          </div>
+          <div class="row">
+            <label style="font-size:11px;"><input type="checkbox" id="chk-sim-interact" checked> Cars see &amp; collide with each other</label>
+          </div>
+          <div style="font-size:11px; margin-top:8px;">Live sensor readings (selected robot):</div>
+          <div class="term" style="height:140px;" id="sim-readings">Waiting for sim...</div>
+        </div>
+
+        <div class="group-box">
+          <div class="gb-title">RL Training &mdash; Linear Policy (W&middot;x + b)</div>
+          <div class="row">
+            <span class="label-fixed" style="width:70px;">Total steps:</span>
+            <input type="number" id="f-steps" value="200000" style="width:80px;">
+            <span style="margin-left:auto;">LR:</span>
+            <input type="number" id="f-lr" value="0.00030" style="width:60px;" step="0.0001">
+          </div>
+          <div class="row">
+            <span class="label-fixed" style="width:70px;">Device:</span>
+            <select id="f-device" style="width:80px;"><option>cpu</option><option>cuda</option></select>
+            <span style="margin-left:auto;">Parallel envs:</span>
+            <input type="number" id="f-n-envs" value="4" style="width:60px;">
+          </div>
+          <div class="row">
+            <label style="font-size:11px;"><input type="checkbox" id="chk-sim-respawn" checked> Auto-respawn RL robots on crash</label>
+          </div>
+          <div class="row" style="margin-bottom:6px;">
+            <label style="font-size:11px;"><input type="checkbox" id="f-same-scene"> Same-scene multi-agent (cars see each other)</label>
+          </div>
+          
+          <div class="row">
+            <span class="label-fixed" style="width:60px;">Save path:</span>
+            <input type="text" id="f-save-path" value="checkpoints/wall_follower_ppo" style="flex:1;">
+          </div>
+          
+          <div class="row" style="margin-top:8px;">
+            <button class="btn" style="flex:1;" id="btn-start" onclick="startJob()">Start Training</button>
+            <button class="btn" style="flex:1;" onclick="loadPolicyIntoSim()">Use current weights on RL robots</button>
+            <button class="btn danger" style="display:none;" id="btn-stop" onclick="cancelJob()">Stop</button>
+          </div>
+          <div style="font-size:10px; color:#666; margin:4px 0;" id="ts-state">Ready</div>
+          <textarea class="term" style="width:100%; height:80px; background:#fff; color:#000; border:1px solid var(--border);" id="eval-pre"></textarea>
+          <div style="height:120px; border:1px solid var(--border); margin-top:4px;"><canvas id="reward-chart"></canvas></div>
+        </div>
+
+      </div>
+    </div>
+    
+    <!-- Track Builder Tab -->
+    <div id="track-panel" style="flex:1; display:none;">
+      <div id="track-canvas-wrap" style="flex:1;">
+        <canvas id="track-canvas"></canvas>
+      </div>
+      <div class="splitter-h" id="split-track"></div>
+      <div id="track-sidebar" style="width:300px; padding:0 8px; flex-shrink:0;">
+        <div class="group-box">
+          <div class="gb-title">Grid _Snap</div>
+          <div class="row"><label style="font-size:11px;"><input type="checkbox" id="tb-show-grid" checked onchange="tbRender()"> Show grid</label></div>
+          <div class="row"><label style="font-size:11px;"><input type="checkbox" id="tb-snap" checked> Snap to grid</label></div>
+          <div class="row" style="margin-top:8px;">
+            <span class="label-fixed" style="width:100px;">Cell size (cm):</span>
+            <input type="number" id="tb-cell" value="10.00" step="0.5" style="flex:1;" onchange="tbRender()">
+          </div>
+          <div style="font-size:10px; color:#666; margin-top:8px;">Click empty space and drag to draw a wall. Drag yellow handles to move endpoints. Right-click a wall to delete.</div>
+        </div>
+        
+        <div class="group-box">
+          <div class="gb-title">Track File</div>
+          <div class="row">
+            <button class="btn" style="flex:1;" onclick="tbSave()">Save...</button>
+            <button class="btn" style="flex:1;" onclick="document.getElementById('tb-file').click()">Load...</button>
+            <input type="file" id="tb-file" style="display:none" accept=".yaml,.yml" onchange="tbLoadFile(event)">
+          </div>
+          <div class="row">
+            <button class="btn" style="flex:1;" onclick="tbReset()">Reset to Default</button>
+            <button class="btn" style="flex:1;" onclick="tbClear()">Clear All</button>
+          </div>
+        </div>
+        
+        <div class="group-box">
+          <div class="gb-title">Track Info</div>
+          <pre id="tb-info" style="font-size:11px; font-family:var(--mono); margin-top:4px;">walls  : 0
+bounds : 
+perim. : 0 cm</pre>
+        </div>
       </div>
     </div>
 
-    <!-- Training panel -->
-    <div id="train-panel" class="hidden">
-      <div id="train-form">
-        <div class="form-row">
-          <label>Track ID</label>
-          <input id="f-track-id" type="text" placeholder="paste track ID…" />
+    <!-- Robot Builder Tab -->
+    <div id="robot-panel" style="flex:1; display:none;">
+      <div id="robot-sidebar" style="width:350px; padding:0 8px; overflow-y:auto; flex-shrink:0;">
+        <div class="group-box">
+          <div class="gb-title">Chassis _Wheels (cm)</div>
+          <div id="rb-dims-form"></div>
         </div>
-        <div class="form-row">
-          <label>Minutes (1–10)</label>
-          <input id="f-minutes" type="number" value="3" min="1" max="10" />
+        
+        <div class="group-box">
+          <div class="gb-title">Sensor Placements (body frame)</div>
+          <div id="rb-placements-form"></div>
         </div>
-        <div class="form-row">
-          <label>Parallel envs</label>
-          <input id="f-n-envs" type="number" value="8" min="1" max="16" />
+        
+        <div class="group-box">
+          <div class="gb-title">IR Calibration</div>
+          <div id="rb-ir-form"></div>
         </div>
-        <div class="form-row">
-          <label>Learning rate</label>
-          <input id="f-lr" type="number" value="0.0003" step="0.0001" />
+        
+        <div class="group-box">
+          <div class="gb-title">Lidar Calibration</div>
+          <div id="rb-lidar-form"></div>
         </div>
-        <div class="btn-row">
-          <button class="btn primary" id="btn-start" onclick="startJob()">Start</button>
-          <button class="btn danger"  id="btn-stop"  onclick="cancelJob()" disabled>Cancel</button>
-          <button class="btn"         id="btn-load-policy" onclick="loadPolicyIntoSim()" disabled>Load policy →</button>
+        
+        <div class="group-box">
+          <div class="gb-title">Save / Load</div>
+          <div class="row">
+            <button class="btn" style="flex:1;" onclick="rbSave('calibration')">Save Calibration...</button>
+            <button class="btn" style="flex:1;" onclick="document.getElementById('rb-cal-file').click()">Load Calibration...</button>
+            <input type="file" id="rb-cal-file" style="display:none" accept=".yaml,.yml" onchange="rbLoadFile(event, 'calibration')">
+          </div>
+          <div class="row">
+            <button class="btn" style="flex:1;" onclick="rbSave('dims')">Save Dims...</button>
+            <button class="btn" style="flex:1;" onclick="document.getElementById('rb-dims-file').click()">Load Dims...</button>
+            <input type="file" id="rb-dims-file" style="display:none" accept=".yaml,.yml" onchange="rbLoadFile(event, 'dims')">
+          </div>
+          <div class="row"><button class="btn" style="flex:1;" onclick="rbReset()">Reset Robot to Defaults</button></div>
         </div>
       </div>
-
-      <div id="reward-chart-wrap" style="height:140px">
-        <canvas id="reward-chart" style="width:100%;height:124px"></canvas>
-      </div>
-
-      <div id="train-stats">
-        <div class="stat"><span>Step</span><span id="ts-step">—</span></div>
-        <div class="stat"><span>Mean reward</span><span id="ts-reward">—</span></div>
-        <div class="stat"><span>FPS</span><span id="ts-fps">—</span></div>
-        <div class="stat"><span>State</span><span id="ts-state">—</span></div>
-      </div>
-
-      <div id="eval-card">
-        <h3>Eval result</h3>
-        <pre id="eval-pre"></pre>
+      <div class="splitter-h" id="split-robot"></div>
+      <div id="robot-canvas-wrap" style="flex:1; background:#fff;">
+        <canvas id="robot-canvas"></canvas>
       </div>
     </div>
 
-    <!-- Controller Editor panel -->
-    <div id="controller-panel" class="hidden" style="flex:1; display:flex; flex-direction:column; background:var(--bg); border-left:1px solid var(--border);">
-      <div style="display:flex; justify-content:flex-start; gap: 8px; padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--border);">
-        <input type="text" id="ctrl-name" value="my_ctrl" style="background:#222; color:var(--text); border:1px solid var(--border); padding:4px 8px; border-radius:4px; font-family:var(--font);" />
-        <button class="btn primary" onclick="compileController()">Compile & Run</button>
-        <button class="btn danger" onclick="stopController()">Stop</button>
+    <!-- Controller Editor Tab -->
+    <div id="controller-panel" style="flex:1; display:none;">
+      <div style="flex:1; display:flex; flex-direction:column; padding-right:8px;">
+        <div class="group-box" style="flex:1; display:flex; flex-direction:column; padding-bottom:12px;">
+          <div class="gb-title">C source</div>
+          <div class="row">
+            <span style="font-size:11px;">Name:</span>
+            <input type="text" id="ctrl-name" value="my_ctrl" style="width:100px;">
+            <button class="btn" onclick="document.getElementById('ctrl-file').click()">Load from file...</button>
+            <input type="file" id="ctrl-file" style="display:none" accept=".c,.cpp,.h" onchange="ctrlLoadFile(event)">
+            <button class="btn" onclick="loadCtrlTemplate('template')">Load template</button>
+            <button class="btn" onclick="loadCtrlTemplate('quick')">Quick-paste skeleton</button>
+            <button class="btn" onclick="loadCtrlTemplate('example')">Load wall-follower example</button>
+          </div>
+          <textarea id="ctrl-editor" style="flex:1; margin-top:8px; border:1px solid var(--border); padding:8px; font-family:var(--mono); resize:none; outline:none; white-space:pre;" spellcheck="false"></textarea>
+        </div>
+        
+        <div class="group-box" style="height:150px; display:flex; flex-direction:column; padding-bottom:12px;">
+          <div class="gb-title">Compile _Register</div>
+          <div class="row">
+            <button class="btn" onclick="compileController()">Compile + Register</button>
+            <span style="font-size:11px; color:#666;" id="ctrl-status">idle</span>
+          </div>
+          <textarea id="ctrl-log" style="flex:1; margin-top:8px; border:1px solid var(--border); background:#fcfcfc; padding:8px; font-family:var(--mono); resize:none; color:#333;" readonly placeholder="Compiler output will appear here."></textarea>
+        </div>
       </div>
-      <textarea id="ctrl-editor" style="flex:1; width:100%; background:var(--bg); color:var(--text); font-family:var(--font); padding:12px; border:none; resize:none; outline:none;" spellcheck="false">
-#include "hal.h"
-#include <stdint.h>
-#include <math.h>
-
-void robot_init(void) {
-      // init logic
-}
-
-void robot_tick(void) {
-      CAN_SetMotors(5000, 5000, 3000);
-}
-</textarea>
+      <div class="splitter-h" id="split-controller"></div>
+      <div id="controller-sidebar" style="width:300px; padding-left:8px; display:flex; flex-direction:column; flex-shrink:0;">
+        <div class="group-box" style="flex:1; display:flex; flex-direction:column;">
+          <div class="gb-title">Registered controllers:</div>
+          <select size="10" style="flex:1; margin-bottom:8px; font-family:var(--mono);" id="ctrl-list"></select>
+          <div style="text-align:right;"><button class="btn" onclick="removeController()">Remove selected</button></div>
+        </div>
+      </div>
     </div>
 
   </div> <!-- end main div -->
 
   <!-- log strip -->
-  <div id="log-panel">
-    <div id="log-header" onclick="toggleLog()">▸ Log</div>
-    <div id="log-body"></div>
-  </div>
+  <div id="log-panel">Ready</div>
 
 </div>
 
 <script src="sim.js?v=2"></script>
 <script src="training.js?v=2"></script>
+<script src="track_builder.js"></script>
+<script src="robot_builder.js"></script>
+
 <script>
   function setTab(tab) {
     document.getElementById('tab-sim').classList.toggle('active', tab === 'sim');
-    document.getElementById('tab-train').classList.toggle('active', tab === 'train');
+    document.getElementById('tab-track').classList.toggle('active', tab === 'track');
+    document.getElementById('tab-robot').classList.toggle('active', tab === 'robot');
     document.getElementById('tab-controller').classList.toggle('active', tab === 'controller');
     
-    // Hide #sim-panel too unless we are strictly on sim or train (train shows both)
-    if (tab === 'controller') {
-        document.getElementById('sim-panel').style.display = 'none';
-        document.getElementById('train-panel').classList.add('hidden');
-        document.getElementById('controller-panel').classList.remove('hidden');
-    } else if (tab === 'train') {
-        document.getElementById('sim-panel').style.display = 'flex';
-        document.getElementById('train-panel').classList.remove('hidden');
-        document.getElementById('controller-panel').classList.add('hidden');
-    } else {
-        document.getElementById('sim-panel').style.display = 'flex';
-        document.getElementById('train-panel').classList.add('hidden');
-        document.getElementById('controller-panel').classList.add('hidden');
-    }
+    document.getElementById('sim-panel').style.display = (tab === 'sim') ? 'flex' : 'none';
+    document.getElementById('track-panel').style.display = (tab === 'track') ? 'flex' : 'none';
+    document.getElementById('robot-panel').style.display = (tab === 'robot') ? 'flex' : 'none';
+    document.getElementById('controller-panel').style.display = (tab === 'controller') ? 'flex' : 'none';
+    
+    if (tab === 'track') { setTimeout(tbResize, 0); tbLoad(); }
+    if (tab === 'robot') { setTimeout(rbResize, 0); rbLoad(); }
   }
 
   function log(msg, cls='') {
-    const p = document.createElement('p');
-    if (cls) p.className = cls;
-    p.textContent = new Date().toTimeString().slice(0,8) + '  ' + msg;
-    const body = document.getElementById('log-body');
-    body.appendChild(p);
-    body.scrollTop = body.scrollHeight;
-    while (body.children.length > 300) body.removeChild(body.firstChild);
+    document.getElementById('log-panel').textContent = msg;
+    if(cls==='err') console.error(msg);
   }
 
   function setConnected(ok) {
@@ -152,21 +266,32 @@ void robot_tick(void) {
     d.className = ok ? 'connected' : '';
     l.textContent = ok ? 'connected' : 'disconnected';
   }
-
-  function toggleLog() {
-    document.getElementById('log-panel').classList.toggle('expanded');
-    document.getElementById('log-header').textContent =
-      document.getElementById('log-panel').classList.contains('expanded') ? '▾ Log' : '▸ Log';
-  }
-
   window.pysaac = { log, setConnected };
+
+  async function loadCtrlTemplate(kind) {
+      const jwt = sessionStorage.getItem('pysaac_jwt');
+      if (!jwt) { log("No JWT, please login.", "err"); return; }
+      try {
+          const res = await fetch("/gui/controller_templates", { headers: { "Authorization": `Bearer ${jwt}` } });
+          const data = await res.json();
+          const ed = document.getElementById('ctrl-editor');
+          if (kind === 'template') ed.value = data.starter;
+          if (kind === 'quick') ed.value = data.quick_paste;
+          if (kind === 'example') ed.value = data.example;
+          log("Template loaded.");
+      } catch (e) {}
+  }
+  window.addEventListener('DOMContentLoaded', () => loadCtrlTemplate('template'));
 
   async function compileController() {
       const name = document.getElementById('ctrl-name').value;
       const code = document.getElementById('ctrl-editor').value;
       const jwt = sessionStorage.getItem('pysaac_jwt');
-      if (!jwt) { log("No JWT, please login.", "err"); return; }
-      log(`Compiling controller '${name}'...`);
+      const st = document.getElementById('ctrl-status');
+      const cl = document.getElementById('ctrl-log');
+      if (!jwt) return;
+      st.textContent = "compiling...";
+      cl.value = "";
       try {
           const res = await fetch("/gui/compile_controller", {
               method: "POST",
@@ -175,23 +300,92 @@ void robot_tick(void) {
           });
           const data = await res.json();
           if (data.status === "ok") {
-              log(`Controller '${name}' running!`, "connected");
-              setTab("sim");
+              st.textContent = `registered '${name}'`;
+              cl.value = `Successfully compiled and registered '${name}'.`;
+              log(`Controller '${name}' running!`);
+              // add to list
+              const list = document.getElementById('ctrl-list');
+              const opt = document.createElement('option');
+              opt.text = name; list.add(opt);
           } else {
-              log(`Compilation failed: ${data.error}`, "err");
+              st.textContent = "compile failed";
+              cl.value = data.error;
           }
       } catch (e) {
-          log(`Error: ${e}`, "err");
+          st.textContent = "compile failed";
+          cl.value = String(e);
       }
   }
-  async function stopController() {
+
+  async function removeController() {
+      const list = document.getElementById('ctrl-list');
+      if (list.selectedIndex < 0) return;
+      const name = list.options[list.selectedIndex].value;
       const jwt = sessionStorage.getItem('pysaac_jwt');
       if (!jwt) return;
       try {
-          await fetch("/gui/stop_controller", { method: "POST", headers: { "Authorization": `Bearer ${jwt}` } });
-          log("C controller stopped.");
-      } catch(e) {}
+          await fetch(`/gui/controllers/${name}`, { method: "DELETE", headers: { "Authorization": `Bearer ${jwt}` } });
+          list.remove(list.selectedIndex);
+          pysaac.log(`Removed controller '${name}'`);
+          // Note: we should probably refresh the sim robot list too, since they fallback to 'rl'
+          // but if we are on the Controller tab it doesn't matter immediately.
+      } catch (e) {
+          pysaac.log(`Error removing controller: ${e}`, "err");
+      }
   }
+
+  function ctrlLoadFile(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = e => {
+          document.getElementById('ctrl-editor').value = e.target.result;
+          document.getElementById('ctrl-name').value = file.name.split('.')[0];
+      };
+      reader.readAsText(file);
+      event.target.value = '';
+  }
+  
+  // Splitter logic
+  function setupSplitter(resizerId, targetId, isLeft) {
+    const resizer = document.getElementById(resizerId);
+    if (!resizer) return;
+    const target = document.getElementById(targetId);
+    
+    resizer.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      document.body.style.cursor = 'col-resize';
+      
+      const startX = e.clientX;
+      const startWidth = target.getBoundingClientRect().width;
+      
+      const onMouseMove = (eMove) => {
+        const dx = eMove.clientX - startX;
+        let newWidth = isLeft ? startWidth + dx : startWidth - dx;
+        if (newWidth > 150) {
+          target.style.width = newWidth + 'px';
+          if(window.tbResize) window.tbResize();
+          if(window.rbResize) window.rbResize();
+        }
+      };
+      
+      const onMouseUp = () => {
+        document.body.style.cursor = '';
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+      };
+      
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+    });
+  }
+  
+  window.addEventListener('DOMContentLoaded', () => {
+    setupSplitter('split-sim', 'sim-sidebar', false);
+    setupSplitter('split-track', 'track-sidebar', false);
+    setupSplitter('split-robot', 'robot-sidebar', true);
+    setupSplitter('split-controller', 'controller-sidebar', false);
+  });
 </script>
 </body>
 </html>
