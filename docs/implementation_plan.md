@@ -67,10 +67,16 @@ PySaacSim/
 │   ├── app.py                  FastAPI entrypoint
 │   ├── auth.py                 Sign in with Apple → JWT
 │   ├── jobs.py                 Job queue + state
-│   ├── ws.py                   WebSocket progress hub
+│   ├── ws.py                   WebSocket progress hub (jobs + sim)
 │   ├── apns.py                 APNs push client
 │   ├── schemas.py              Pydantic models
-│   └── storage.py              Filesystem layout under $PYSAAC_DATA
+│   ├── sim_runner.py           Headless async simulation loop
+│   ├── storage.py              Filesystem layout under $PYSAAC_DATA
+│   └── static/
+│       ├── index.html          Web UI shell (vanilla JS, no framework)
+│       ├── sim.js              Canvas renderer + sim WebSocket client
+│       ├── training.js         Training controls + reward chart (Chart.js CDN)
+│       └── style.css
 ├── models/                     NEW  (gitignored)
 │   ├── base_policy.zip         Offline-trained SB3 checkpoint
 │   └── sam3.pt                 SAM3 weights (downloaded on first run)
@@ -587,11 +593,133 @@ cloudflared tunnel route dns pysaac api.<your-domain>   # DNS CNAME
 
 Then populate `config.yml` with the printed `TUNNEL_ID`. `cloudflared tunnel run pysaac` reads `~/.cloudflared/config.yml`.
 
-### 7.11 Tests
+### 7.11 Web UI — headless sim + remote dashboard
+
+Serve a browser-accessible version of the core GUI functionality at `https://api.<your-domain>/ui`. The existing PyQt desktop app continues to work unchanged; this is an additional access path, not a replacement.
+
+**Scope.** Three panels only — simulation live view, training controls, and log output. Robot-builder and full track-builder remain desktop-only. The iOS app covers race-day track upload.
+
+#### New files
+
+```
+server/
+├── sim_runner.py     Headless async simulation loop (no PyQt dependency)
+└── static/
+    ├── index.html    Single-page app shell (no framework — vanilla JS)
+    ├── sim.js        Canvas renderer + WebSocket client
+    ├── training.js   Training controls + Chart.js reward plot
+    └── style.css
+```
+
+Add `server/static/` to `server/app.py`:
+
+```python
+from fastapi.staticfiles import StaticFiles
+app.mount("/ui", StaticFiles(directory="server/static", html=True), name="ui")
+```
+
+#### `server/sim_runner.py` — headless simulation
+
+The existing `sim/physics.py` and `sim/sensors.py` have zero PyQt dependency. A headless runner wraps them in an asyncio task:
+
+```python
+class SimRunner:
+    def __init__(self, walls, cal, spawn, policy=None):
+        self._pose  = Pose(**spawn)
+        self._walls = walls
+        self._cal   = cal
+        self._policy = policy        # AbstractController | None
+        self._running = False
+        self._cmd   = MotorCommand()  # overridden by /sim/command if no policy
+
+    async def run(self):
+        self._running = True
+        dt = PHYSICS_DT_S
+        while self._running:
+            for _ in range(20):          # 20 ms wall-clock ≈ 50 Hz control tick
+                self._pose = physics.step(self._pose, self._cmd, self._walls, dt)
+            sensors = sample_sensors(self._walls, self._pose, self._cal)
+            if self._policy:
+                self._cmd = self._policy.tick(sensors, ...)
+            await self._broadcast(sensors)
+            await asyncio.sleep(0.02)    # ~50 Hz, real-time
+
+    async def _broadcast(self, sensors):
+        msg = {
+            "pose": dataclasses.asdict(self._pose),
+            "sensors": _flatten_sensors(sensors),
+            "cmd": dataclasses.asdict(self._cmd),
+        }
+        await ws_hub.broadcast_sim(json.dumps(msg))
+```
+
+`app.state.sim_runner` holds the singleton. Created on startup with the default oval + default calibration. The active track (after a `/tracks/{id}/confirm`) can be swapped via `POST /sim/reset`.
+
+#### New endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/ui` | Serves `index.html` |
+| WS | `/sim/events` | Streams pose + sensor JSON at ~50 Hz. Same JWT auth. |
+| POST | `/sim/command` | Body: `{throttle, steer}` ∈ [−1,1]. Manual override when no policy is loaded. |
+| POST | `/sim/reset` | Body: `{track_id?, spawn?}`. Resets pose; optionally swaps to a confirmed track. |
+| POST | `/sim/policy` | Body: `{job_id}`. Loads the finished policy from that job into the runner. |
+| DELETE | `/sim/policy` | Unloads policy; reverts to manual `/sim/command` mode. |
+
+#### `server/static/index.html` layout
+
+Three columns, no framework, mobile-readable:
+
+```
+┌─────────────────────────────────────────┐
+│  PysaacRC  [Sim ▶]  [Train ▶]  [Log]   │  ← tab bar
+├──────────────────┬──────────────────────┤
+│                  │  Training            │
+│   <canvas>       │  Steps: 1.2M         │
+│   (sim view)     │  Reward: ──────╮     │
+│                  │                │     │  ← reward chart (Chart.js CDN)
+│                  │  [Start] [Stop]│     │
+│                  │  [Load policy] │     │
+├──────────────────┴──────────────────────┤
+│  Log output (scrolling pre)             │
+└─────────────────────────────────────────┘
+```
+
+#### `server/static/sim.js` — canvas renderer
+
+Connect to `wss://api.<domain>/sim/events` with the stored JWT. On each message:
+
+1. Clear canvas.
+2. Draw walls as grey lines. Wall geometry is fetched once from `GET /sim/state` on load and cached.
+3. Draw robot rectangle at `(pose.x, pose.y, pose.theta)` scaled to canvas.
+4. Draw five sensor rays (3 lidar + 2 IR) with hit distances, colour-coded by proximity.
+5. Draw velocity vector arrow.
+
+Canvas coordinate system: world cm → canvas px with a fixed scale (`px_per_cm`) so the full track fits. Pan/zoom optional but out of scope for v1.
+
+Keyboard shortcut: WASD or arrow keys → POST `/sim/command` (useful for manual debugging without a gamepad).
+
+#### `server/static/training.js` — training controls
+
+- Mirrors the job flow from the iOS app: POST `/jobs/train`, subscribe to `wss://.../jobs/{id}/events`, update reward chart.
+- `hyperparams` form: `total_timesteps`, `n_envs`, `learning_rate` — POSTed as optional fields to `/jobs/train`.
+- "Load policy into sim" button: calls `POST /sim/policy` with the finished `job_id` and switches the sim tab into live policy-run mode.
+
+#### Cloudflare Tunnel WebSocket note
+
+`/sim/events` streams at 50 Hz for as long as the browser tab is open. The existing 20 s heartbeat in §7.5 applies here too. No additional config needed.
+
+#### Tests
+
+- `tests/test_sim_runner.py` — instantiate `SimRunner` on the default oval, run 500 ms of sim time (asyncio `run_until_complete`), assert pose changed and broadcast was called.
+- Add `/sim/events` and `/sim/command` to the `websocat` / `curl` smoke tests in §10.
+
+### 7.12 Tests
 
 - `tests/test_server_auth.py` — mock Apple JWK, verify JWT round-trip.
 - `tests/test_server_jobs.py` — submit a fake job (monkeypatch the trainer to sleep), assert state transitions and WS broadcasts.
 - `tests/test_server_tracks.py` — upload a synthetic photo, expect a non-error track response.
+- `tests/test_sim_runner.py` — headless sim runs and broadcasts correctly (see §7.11).
 
 ---
 
@@ -716,8 +844,9 @@ Build in this order. Each step must be green before starting the next.
 4. `training/base_policy.py` — launch overnight, check TensorBoard at 1M and 10M.
 5. `training/finetune.py` — with a mocked base ckpt, verify 2M steps in < 4 min.
 6. `cv/` — end-to-end on a real phone photo of a hand-built track (do this offline before wiring to the server).
-7. `server/` — local-only first (`--host 127.0.0.1`). Use `curl` + `websocat` to exercise every endpoint.
-8. Cloudflare Tunnel exposure + reach server from phone on LTE (not WiFi — different path). Verify WebSocket survives 8 min idle-ish with heartbeats.
+7. `server/sim_runner.py` — run `test_sim_runner.py`, then open `http://localhost:8787/ui` in a browser and verify the canvas renders the oval and sensor rays move.
+8. `server/` REST + WS — local-only first (`--host 127.0.0.1`). Use `curl` + `websocat` to exercise every endpoint including `/sim/command` with WASD inputs.
+9. Cloudflare Tunnel exposure + reach web UI and server from phone on LTE (not WiFi — different path). Verify both the job WebSocket and the 50 Hz sim stream survive the Cloudflare idle timeout with heartbeats.
 9. iOS app, screen by screen. Each screen gated by the server endpoint it calls working.
 10. First full end-to-end run with a real track. Measure all steps in §9 and update the budget table.
 
@@ -815,7 +944,8 @@ Collected here so nobody has to rediscover them.
 12. **Progress reward wrap-around.** On the first step after the robot crosses the start/finish line, the arclength projection jumps by `-total_length`. Use the arc-pointer pseudocode in §3 to prevent this (search within a sliding window around the last known idx).
 13. **Do not commit `.env`, `models/`, `$PYSAAC_DATA`, the `.p8` key, or the Cloudflare credentials JSON.** Add to `.gitignore` before the first commit.
 14. **Time estimates in §9 are for the steady state.** First request after server boot pays SAM3 lazy-init (~8 s) and CUDA kernel cache (~3 s). Warm them both at startup so the user never sees cold latency.
-15. **Progress WS reconnection race.** A client that reconnects between the final `progress` row and the `done` event could miss `done`. Always persist the terminal state to `state.json` before closing WS, and have the client GET `/jobs/{id}` on reconnect to catch up.
+15. **`/sim/events` is 50 Hz per connected client.** Two open browser tabs = 100 frames/s broadcast. Gate on `len(subscribers) > 0` inside `SimRunner.run()` and skip the broadcast (but not the physics step) when nobody is watching.
+16. **Progress WS reconnection race.** A client that reconnects between the final `progress` row and the `done` event could miss `done`. Always persist the terminal state to `state.json` before closing WS, and have the client GET `/jobs/{id}` on reconnect to catch up.
 
 ---
 
