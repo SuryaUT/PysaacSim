@@ -8,25 +8,32 @@ import math
 
 
 # -- Geometry (cm) ----------------------------------------------------------
-CHASSIS_WIDTH_CM = 19.05
-CHASSIS_LENGTH_CM = 30.48
+# Measured on the physical robot.
+CHASSIS_WIDTH_CM = 19.0
+CHASSIS_LENGTH_CM = 29.5
 CHASSIS_HEIGHT_CM = 13.97
 
 FRONT_WHEEL_DIAM_CM = 7.62
 REAR_WHEEL_DIAM_CM = 6.985
 
-FRONT_AXLE_FROM_FRONT_CM = 10.16
-REAR_AXLE_FROM_REAR_CM = 5.08
-WHEELBASE_CM = CHASSIS_LENGTH_CM - FRONT_AXLE_FROM_FRONT_CM - REAR_AXLE_FROM_REAR_CM
-REAR_TRACK_CM = CHASSIS_WIDTH_CM - 2.0
+# Axle-from-edge values picked to match the measured wheelbase below.
+# Rendering only; physics uses WHEELBASE_CM / REAR_TRACK_CM directly.
+FRONT_AXLE_FROM_FRONT_CM = 9.85
+REAR_AXLE_FROM_REAR_CM = 4.85
+WHEELBASE_CM = 14.8            # measured
+REAR_TRACK_CM = 18.0           # measured
 
 
 # -- Steering (MG996R) ------------------------------------------------------
+# Measured PWM endpoints on the physical robot:
+#   2000 = full left (+53° in CCW-positive yaw convention)
+#   3200 = center
+#   4400 = full right (-53°)
 SERVO_TIMER_HZ = 2_000_000
 SERVO_MIN_COUNT = 2000
-SERVO_CENTER_COUNT = 3000
-SERVO_MAX_COUNT = 4000
-STEER_LIMIT_RAD = math.radians(30)
+SERVO_CENTER_COUNT = 3200
+SERVO_MAX_COUNT = 4400
+STEER_LIMIT_RAD = math.radians(53)
 SERVO_RAD_PER_SEC = math.radians(60) / 0.17
 
 
@@ -57,7 +64,7 @@ def duty_count_to_pwm01(count: int) -> float:
 
 
 # -- Dynamics ---------------------------------------------------------------
-MASS_KG = 1.449
+MASS_KG = 1.453                # measured 1453 g
 _w_m = CHASSIS_WIDTH_CM / 100.0
 _l_m = CHASSIS_LENGTH_CM / 100.0
 INERTIA_KG_M2 = MASS_KG * (_w_m * _w_m + _l_m * _l_m) / 12.0

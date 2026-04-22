@@ -36,7 +36,8 @@ ir:
 
 lidar:
   max_cm: 800.0         # TF-Luna spec: 8 m max
-  noise_std_cm: 2.0
+  # Measured: avg 163 mm, stdev 0.56 mm → 0.056 cm (SNR 291, 24.64 dB power).
+  noise_std_cm: 0.056
   fov_rad: 0.0349       # ~2 deg (modeled as a single ray — FOV unused for now)
   rate_hz: 100.0
 
@@ -46,16 +47,20 @@ lidar:
   distance_bias_cm: 0.0
 
 # Sensor placements in body frame: +x forward, +y left, origin at chassis
-# center. Lidars mounted 1.9 cm behind the front edge (chassis_len/2 - 1.9
-# = 15.24 - 1.9 = 13.34). IR-to-angled-lidar longitudinal offset = 15.875 cm,
-# matching the measured real robot.
+# center. Chassis is 29.5 × 19.0 cm, so half-length 14.75 and half-width 9.5.
+# All values measured from the physical robot.
+#   Center lidar : 0 cm from front, centered (y = 0)             → x = +14.75
+#   Left lidar   : 1 cm from front, 2 cm from left edge, +45°    → x = +13.75, y = +7.5
+#   Right lidar  : 1 cm from front, 2 cm from right edge, -45°   → x = +13.75, y = -7.5
 lidar_placements:
-  - {id: tfluna_center, x: 13.34, y:  0.00, theta:  0.0000}
-  - {id: tfluna_left,   x: 13.34, y:  7.62, theta:  0.7854}   #  +45 deg
-  - {id: tfluna_right,  x: 13.34, y: -7.62, theta: -0.7854}   #  -45 deg
+  - {id: tfluna_center, x: 14.75, y:  0.00, theta:  0.0000}
+  - {id: tfluna_left,   x: 13.75, y:  7.50, theta:  0.7854}   #  +45 deg
+  - {id: tfluna_right,  x: 13.75, y: -7.50, theta: -0.7854}   #  -45 deg
 
-# IR sensors mounted 5 in (12.7 cm) from the rear → x = 15.24 - 12.7 - 5.08
-# = -2.54 cm, inset 3 in (7.62 cm) from centerline, pointing straight outward.
+# IR mid-side, 11.8 cm from rear edge, 1 cm inset from the side edge,
+# pointing straight outward.
+#   x = -14.75 + 11.8 = -2.95
+#   y = ±(9.5 - 1.0) = ±8.50
 ir_placements:
-  - {id: ir_left,  x: -2.54, y:  7.62, theta:  1.5708}        # +90 deg
-  - {id: ir_right, x: -2.54, y: -7.62, theta: -1.5708}        # -90 deg
+  - {id: ir_left,  x: -2.95, y:  8.50, theta:  1.5708}        # +90 deg
+  - {id: ir_right, x: -2.95, y: -8.50, theta: -1.5708}        # -90 deg
