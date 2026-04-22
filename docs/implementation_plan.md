@@ -10,8 +10,9 @@
 
 ```
 iPhone app  ──HTTPS──▶  Cloudflare Tunnel  ──▶  FastAPI (desktop)
-  │                                               │
-  │ 1) auth (Sign in with Apple)                  ├─ CV pipeline (SAM2 + ArUco)
+  │ (ARKit rectifies                              │
+  │  floor plane before upload)                   │
+  │ 1) auth (Sign in with Apple)                  ├─ CV pipeline (SAM3 + scale-check)
   │ 2) POST /tracks (photo)                       ├─ Track store
   │ 3) confirm or edit track                      ├─ Job queue (1 GPU worker)
   │ 4) POST /jobs/train                           ├─ Training: SubprocVecEnv × 8
@@ -58,8 +59,8 @@ PySaacSim/
 │   └── export.py               npz + C-header export
 ├── cv/                         NEW
 │   ├── __init__.py
-│   ├── rectify.py              ArUco detection + homography
-│   ├── segment.py              SAM2 mask generation + filtering
+│   ├── validate.py             Scale sanity-check via plank length (no ArUco)
+│   ├── segment.py              SAM3 mask generation + filtering
 │   └── build_track.py          Masks → Segment list + spawn pose
 ├── server/                     NEW
 │   ├── __init__.py
@@ -72,7 +73,7 @@ PySaacSim/
 │   └── storage.py              Filesystem layout under $PYSAAC_DATA
 ├── models/                     NEW  (gitignored)
 │   ├── base_policy.zip         Offline-trained SB3 checkpoint
-│   └── sam2_hiera_small.pt     SAM2 weights (downloaded on first run)
+│   └── sam3.pt                 SAM3 weights (downloaded on first run)
 ├── docs/
 │   └── implementation_plan.md  This file
 ├── ios/                        NEW  (Xcode project — not Python)
@@ -294,48 +295,58 @@ Two outputs:
 
 ## 6. Phase 4 — CV pipeline
 
-### 6.1 Fiducial-driven rectification (`cv/rectify.py`)
+### 6.1 Client-side rectification via ARKit (no fiducials)
 
-**Physical setup (user responsibility, documented in app onboarding).** Print four ArUco markers (dictionary `DICT_4X4_50`, IDs 0/1/2/3, side length 8 cm) and place them at the corners of the track bounding rectangle. Record their world positions in `config/aruco_layout.yaml`:
+**Decision.** Rectification happens **on the iPhone using ARKit**, not on the server. The server receives an already-top-down, metric-scaled image. ArUco markers are not used. See [§8.2](#82-screens) for the iOS side.
 
-```yaml
-marker_side_cm: 8.0
-corners_cm:
-  0: [0.0, 0.0]       # bottom-left
-  1: [400.0, 0.0]     # bottom-right
-  2: [400.0, 250.0]   # top-right
-  3: [0.0, 250.0]     # top-left
-```
+**What the server receives** from the `/tracks` multipart upload:
 
-The `corners_cm` also define the **world bounds** for the reconstructed track; the app can offer a few presets (small/medium/large arena).
+- `photo`: the rectified top-down JPEG (already warped by the iOS client to the floor plane).
+- `px_per_cm`: float, scale factor used for the rectification (e.g. `10.0`).
+- `arkit_confidence`: float in [0, 1], ARKit's plane-tracking confidence at capture time.
+- `camera_height_m`: float, ARKit-measured distance from camera to floor plane at capture (used for sanity check).
+- `image_bounds_cm`: `[w_cm, h_cm]` of the rectified image in world units.
 
-Pipeline:
+Store these in `tracks/{track_id}/meta.json` alongside the photo.
 
-1. `cv2.aruco.ArucoDetector(dict=DICT_4X4_50)`.
-2. Find all four markers. If < 4 → return error with code `ARUCO_MISSING` and the list of IDs found.
-3. Build homography: source points = marker centers in the image; destination points = `corners_cm` scaled to a top-down pixel canvas (10 px/cm default → destination canvas is e.g. 4000×2500 px).
-4. `cv2.warpPerspective` the input photo to the canvas. This is the **rectified image**. Store its scale factor (`px_per_cm`) in the track dict.
+### 6.1a Scale sanity check (`cv/validate.py`)
 
-Error cases to surface to the app:
+ARKit is usually accurate to ~2%, but drifts on glass floors, low-texture scenes, and fast phone motion. Validate against the known 80 cm plank length:
 
-- Fewer than 4 markers detected.
-- Markers detected but homography ill-conditioned (determinant ratio out of [0.5, 2.0]).
-- Photo resolution < 1 MP (warn but allow).
+1. Run the §6.2 segmentation first (we need the detected block rectangles).
+2. For each detected block, take the long axis length in cm (using `px_per_cm`).
+3. Compute `median_long_cm`.
+4. Assert `0.72 <= median_long_cm / 80 <= 1.10` (−10% / +10% band, slightly asymmetric because foreshortening biases low).
+5. If outside the band, return error code `SCALE_MISMATCH` with both numbers, prompting the app to request a re-capture. Do not proceed to training.
+6. If `< 4` blocks detected, skip the check (report a warning, not an error — the user may have built a minimal course).
+
+The plank length `80.0` cm and the tolerance band live in `config/server.yaml` under `cv.plank_length_cm` and `cv.plank_tolerance`.
+
+**Error cases to surface to the app:**
+
+- `ARKIT_LOW_CONFIDENCE` — `arkit_confidence < 0.5` at capture. (Emitted by the server when it reads the meta.)
+- `SCALE_MISMATCH` — plank length check failed; include `expected_cm`, `observed_cm`.
+- `IMAGE_TOO_SMALL` — rectified image < 1 MP (warn but allow).
 
 ### 6.2 Segmentation (`cv/segment.py`)
 
-**Model.** SAM2.1 tiny (`sam2.1_hiera_tiny`, ~40 MB). Download on first server boot if missing. License: Apache 2.0. Import via `segment-anything-2` Python package.
+**Model.** SAM3 (Meta's third-generation Segment Anything). Pick the smallest variant that holds mask quality on wooden planks — start with the "small"/"base" tier and only escalate if recall < 90% on the test photos. Download on first server boot if missing; pre-cache at server install so the first real request doesn't pay download latency.
 
-**Strategy.** `SAM2AutomaticMaskGenerator` with:
+**Strategy.** SAM3 supports **text-promptable** segmentation in addition to automatic mask generation. Prefer the text-prompted path for this task — it's much more selective:
 
 ```python
-points_per_side=32,
-pred_iou_thresh=0.85,
-stability_score_thresh=0.92,
-min_mask_region_area=400,   # px — tunable
+# Pseudocode — swap in the real SAM3 API from your access docs.
+masks = sam3.segment(
+    image=rectified_rgb,
+    text_prompt="rectangular wooden plank on the floor",
+    # or multiple prompts: ["wooden plank", "wood block"]
+    score_threshold=0.5,
+)
 ```
 
-Run on the rectified top-down image (§6.1). Yields ~20–200 candidate masks.
+If the text-prompt path is unavailable or underperforms, fall back to SAM3's automatic mask generator with the same tuning philosophy as before (dense grid of point prompts, high stability threshold, reject small regions). Record which path was used in `tracks/{id}/meta.json` so regressions are traceable.
+
+Run on the rectified top-down image (§6.1). Yields ~5–50 candidate masks (text prompt) or ~20–200 (automatic).
 
 **Filtering.**
 
@@ -343,7 +354,7 @@ Run on the rectified top-down image (§6.1). Yields ~20–200 candidate masks.
 2. Drop masks whose bounding-box aspect ratio is outside `[1:1, 1:6]` (blocks are roughly rectangular; very thin masks are shadows).
 3. Drop masks whose fit residual to a minimum-area rotated rectangle > 15% of the rectangle area (non-rectangular → not a block).
 4. Drop masks that touch the image border (likely the arena edge or a hand).
-5. Drop masks overlapping the ArUco marker regions.
+5. Drop masks whose bounding box is within 20 px of the rectified image edge (the user's bounding-box crop in §8.2b should have already excluded off-track area, but double-check).
 
 After filtering, each surviving mask → a rotated rectangle `(cx_cm, cy_cm, w_cm, h_cm, theta_rad)` via `cv2.minAreaRect`.
 
@@ -355,7 +366,7 @@ A single block contributes four wall segments (its four edges) as `sim.geometry.
 
 **Centerline extraction.** The interior of the track (the drivable area) is the complement of the blocks within the rectified bounds. Compute:
 
-1. Build a binary mask: everything inside the outer ArUco rectangle, minus all block masks dilated by `chassis_width / 2` (safety margin).
+1. Build a binary mask: everything inside the rectified image (i.e. the full `image_bounds_cm` region the user traced in §8.2b), minus all block masks dilated by `chassis_width / 2` (safety margin).
 2. Skeletonize the drivable mask with `skimage.morphology.skeletonize` → a 1-px wide curve.
 3. Convert the skeleton to an ordered polyline by walking the largest connected component. Smooth with a Savitzky–Golay filter (window=21). Resample to 200 equispaced points.
 4. If the skeleton isn't closed (non-loop course, e.g. time trial), allow both open and closed centerlines. `env/robot_env.py` must handle both (for open courses, `progress` saturates at the end and truncation reward is based on fraction completed).
@@ -387,7 +398,7 @@ python-jose[cryptography]>=3.3   # JWT
 httpx>=0.27                      # APNs
 opencv-python>=4.9
 scikit-image>=0.22
-segment-anything-2               # or local wheel
+sam3                             # Meta SAM3 (use access-controlled wheel or local install)
 torch>=2.2                       # CUDA build
 numba>=0.59                      # optional, for ray casting
 aiofiles>=23
@@ -535,7 +546,7 @@ Also set `SB3`'s `SubprocVecEnv(start_method="spawn")`. Test on your actual desk
 
 - At server startup, assert `torch.cuda.is_available()` and log `torch.cuda.get_device_name(0)`; refuse to start otherwise (CPU fine-tune won't hit the budget).
 - FastAPI: set the request size limit for `/tracks` to 25 MB (`Starlette`'s `MultiPartParser` accepts `max_file_size`). Phone photos are ~5–10 MB; 25 MB is plenty.
-- Explicitly `torch.cuda.empty_cache()` after SAM2 runs, before the training subprocess is spawned, to avoid fragmentation.
+- Explicitly `torch.cuda.empty_cache()` after SAM3 runs, before the training subprocess is spawned, to avoid fragmentation.
 
 ### 7.10 Cloudflare Tunnel
 
@@ -590,22 +601,62 @@ Then populate `config.yml` with the printed `TUNNEL_ID`. `cloudflared tunnel run
 
 - Xcode project at `ios/PysaacRC/`.
 - SwiftUI + async/await URLSession.
-- iOS 17 minimum (for Sign in with Apple polish and PhotosPicker).
-- Capabilities: Sign in with Apple, Push Notifications, Background Modes (remote-notification).
+- iOS 17 minimum (for Sign in with Apple polish, PhotosPicker, RealityKit 4).
+- Frameworks: `ARKit`, `RealityKit`, `AVFoundation`, `AuthenticationServices`, `UserNotifications`.
+- Capabilities: Sign in with Apple, Push Notifications, Background Modes (remote-notification), Camera, ARKit (requires A12 Bionic or later — iPhone XS+).
 - Dependencies (SwiftPM): **none** — stdlib URLSession does HTTP + WebSocket + multipart. Keep it dependency-free.
 
 ### 8.2 Screens
 
 1. **Auth** — "Sign in with Apple" button. On success, POST `/auth/apple`, store JWT in Keychain. Registers for remote notifications; on token receipt, POST `/devices`.
-2. **Arena picker** — choose arena preset (maps to the ArUco layout in §6.1). Three presets for now: `small 2×1.5 m`, `medium 4×2.5 m`, `large 6×4 m`. Send preset ID with the photo.
-3. **Capture** — full-screen camera view with an overlay showing the four expected ArUco positions as translucent boxes. Shutter button → uploads photo to `/tracks` (multipart, `field=photo`, `arena_preset` form field).
-4. **Track confirm** — shows `rectified.png` overlaid with detected block rectangles and the proposed centerline. User can:
+2. **Scan** — ARKit scene (`ARView` / `ARSession` with `ARWorldTrackingConfiguration`, `planeDetection: .horizontal`). User sweeps the phone over the track; the app shows detected plane extents as a translucent overlay. When the plane covers the track for ≥ 2 seconds and tracking state is `.normal`, enable the "Capture" button. Display a live **camera height (m)** readout from the plane anchor so the user can verify scale.
+3. **Capture** — on shutter:
+   1. Grab the current `ARFrame` (`session.currentFrame`).
+   2. Read `frame.camera.intrinsics` (3×3), `frame.camera.transform`, and the selected plane's `transform`.
+   3. Compute the camera → floor-plane homography in Swift (see §8.2a below). Target a canvas of `px_per_cm = 10`.
+   4. Warp `frame.capturedImage` (CVPixelBuffer → CIImage → CGImage) with the homography. This is the rectified top-down photo.
+   5. Crop rectified image to the user's traced bounding box (§8.2b).
+   6. Upload via multipart POST to `/tracks` with fields: `photo` (JPEG), `px_per_cm`, `arkit_confidence`, `camera_height_m`, `image_bounds_cm`.
+4. **Track confirm** — shows the rectified photo overlaid with detected block rectangles and the proposed centerline, pulled from `GET /tracks/{id}`. User can:
    - Tap a block to delete.
    - Drag to add a block (rotated rectangle gesture).
    - Tap "Regenerate centerline" (PATCH `/tracks/{id}` with edited block list).
    - Tap "Confirm" (POST `/tracks/{id}/confirm`).
+   - If the server returned `SCALE_MISMATCH`, show "Re-scan" instead of "Confirm" and bounce back to Scan.
 5. **Training** — shows live mean-reward curve from the WebSocket and a log tail. Buttons: "Cancel". On `done`, shows the eval dict.
 6. **Artifacts** — downloads `policy.npz` and `policy.h` to the Files app.
+
+### 8.2a Homography from ARKit (Swift)
+
+The transforms ARKit hands you are in a right-handed Y-up world. To rectify to a top-down XZ view of the floor plane:
+
+```swift
+// Inputs:
+//   K: simd_float3x3  — camera intrinsics (frame.camera.intrinsics)
+//   camT: simd_float4x4 — camera pose (frame.camera.transform)
+//   planeT: simd_float4x4 — plane anchor transform (floor plane)
+//   pxPerMeter: Float — e.g. 1000.0 for 10 px/cm
+//
+// Output: 3×3 homography H that maps image pixels (u, v, 1) to (x_world_cm, z_world_cm, 1)
+//
+// Method:
+//   1. Build the plane's basis in world: e_x = planeT.columns.0.xyz, e_z = planeT.columns.2.xyz, o = planeT.columns.3.xyz.
+//   2. For 4 corners of a rectangle on the plane centered at o (meters), project to pixel coords:
+//      P_cam = inverse(camT) * [p_world, 1]
+//      p_pix = K * (P_cam.xyz / P_cam.z)
+//   3. Solve the 4-point homography: cv2.getPerspectiveTransform(pixCorners, planeCornersPx) — do this in Accelerate/simd or call into OpenCV-iOS (carry a thin wrapper). Using a pure-Swift 4-point solver (~40 lines) avoids the OpenCV-iOS dependency.
+//   4. Warp with vImage or Metal. For MVP, use CIFilter.perspectiveCorrection with the 4 corner points (no custom matrix math needed — Core Image accepts the 4 pixel corners directly and does the warp).
+```
+
+Simplest MVP path: skip the explicit homography matrix. Use **`CIFilter.perspectiveCorrection`** and feed it the four pixel coordinates corresponding to a known-size rectangle on the floor plane (say 2 m × 1.5 m centered on the plane origin). Core Image does the warp. Scale = output size / 2 m.
+
+### 8.2b Bounding box picker
+
+After Scan, before Capture, the user drags a rectangle on the AR preview to indicate the track's extent on the floor plane. This rectangle (in plane coordinates) becomes the `image_bounds_cm`. Without this, the rectified image is arbitrary-sized and may include irrelevant floor area that degrades SAM3.
+
+### 8.2c ARKit availability gate
+
+At app launch, check `ARWorldTrackingConfiguration.isSupported`. On failure (iPhone older than XS, unlikely), show a graceful "This device is not supported" screen and exit. Do not implement a non-AR fallback in v1.
 
 ### 8.3 Networking
 
@@ -641,8 +692,9 @@ Out of scope for an internal tool. Distribute to self via Xcode "Run on device" 
 | Step                                  | Target | Notes                                                          |
 |---------------------------------------|--------|----------------------------------------------------------------|
 | Photo upload (4 MB over LTE)          |  3 s   |                                                                |
-| ArUco + rectify                       |  0.5 s |                                                                |
-| SAM2 segmentation (tiny, 3060 Ti)     |  4 s   | GPU warmed up at server boot                                   |
+| ARKit capture + rectify (client-side) |  1 s   | Happens on the phone, not the server                           |
+| Scale sanity check                    |  0.1 s |                                                                |
+| SAM3 segmentation (tiny, 3060 Ti)     |  4 s   | GPU warmed up at server boot                                   |
 | Filter + fit rectangles + centerline  |  1 s   |                                                                |
 | User confirm UI (interactive)         |  0 s   | Does not count toward the 10 min budget                        |
 | Fine-tune 2 M steps (8 envs)          |  3 min | @ ~11 k sps after vectorization                                |
@@ -680,7 +732,7 @@ Build in this order. Each step must be green before starting the next.
 | Base policy doesn't transfer to a weird new track shape        | Wider pre-training distribution; user can request `minutes=10`.   |
 | Public endpoint abused                                         | Sign in with Apple + rate limits + per-user job cap.               |
 | Cloudflare idle-timeout kills long jobs                        | WebSocket heartbeat every 20 s; also jobs run async of any request.|
-| GPU OOM during SAM2 + training overlap                         | Serialize: CV step releases GPU before training starts (explicit `torch.cuda.empty_cache()`). |
+| GPU OOM during SAM3 + training overlap                         | Serialize: CV step releases GPU before training starts (explicit `torch.cuda.empty_cache()`). |
 | Sim-to-real gap from CV-reconstructed geometry ≠ real geometry | 10 % Gaussian jitter on block center/size during fine-tune DR.     |
 | Training crash loses progress                                  | Checkpoint fine-tune every 200k steps; on resume, reload latest.   |
 | iOS app can't keep WebSocket open backgrounded                 | APNs push is the source of truth for "done"; WS is UX-only.        |
@@ -714,13 +766,18 @@ training:
   n_envs: 8
   max_minutes: 10
 cv:
-  sam2_weights: models/sam2_hiera_tiny.pt
-  arena_presets:
-    small:  {corners_cm: [[0,0],[200,0],[200,150],[0,150]]}
-    medium: {corners_cm: [[0,0],[400,0],[400,250],[0,250]]}
-    large:  {corners_cm: [[0,0],[600,0],[600,400],[0,400]]}
-  aruco_dict: DICT_4X4_50
-  marker_side_cm: 8.0
+  sam3_weights: models/sam3.pt
+  sam3_mode: text_prompt            # text_prompt | automatic
+  sam3_text_prompts:
+    - "rectangular wooden plank on the floor"
+    - "wood block"
+  sam3_score_threshold: 0.5
+  plank_length_cm: 80.0
+  plank_tolerance:
+    lower: 0.72    # observed / expected — asymmetric because foreshortening biases low
+    upper: 1.10
+  min_arkit_confidence: 0.5
+  target_px_per_cm: 10.0
 ```
 
 Every piece of code reads from this file; no magic numbers scattered in source.
@@ -749,15 +806,15 @@ Collected here so nobody has to rediscover them.
 3. **`SubprocVecEnv` + CUDA on macOS defaults to `fork` and will hang.** Always pass `start_method="spawn"`.
 4. **SB3 env-per-subprocess `pickle` gotcha.** The `make_env` closure you pass to `SubprocVecEnv` must be picklable under `spawn`. Use a top-level factory function, not a lambda capturing a track dict. Pass the track via env-var or file path and re-load inside the subprocess.
 5. **Monitor wrapper.** Without `stable_baselines3.common.monitor.Monitor` around each env (or `VecMonitor` around the vec), `ep_info_buffer` stays empty and mean reward reads 0. The existing GUI worker already gets this right ([gui/training/worker.py](../gui/training/worker.py)) — copy that pattern.
-6. **ArUco marker detection breaks at sharp angles.** Tell users (in the Capture screen) to shoot from within ~30° of overhead. Overlay a simple tilt indicator using `CMMotionManager`.
-7. **SAM2 model download on first run is ~40 MB and requires internet.** Pre-download during server install; don't make the first user request pay the cost.
+6. **ARKit plane tracking drifts on textureless floors and glass.** The app should gate the shutter on `arkit_confidence ≥ 0.5` and `tracking state == .normal`, and enforce a minimum scan sweep duration (2 s) before enabling capture. The server-side scale sanity check in §6.1a is the backstop when the client gates fail.
+7. **SAM3 weights may be access-gated.** Confirm the download path before deploying; pre-cache on the desktop so the first user request doesn't block on auth or network. Record the exact model version in `tracks/{id}/meta.json` for reproducibility.
 8. **FastAPI + `multiprocessing.Process` + PyTorch:** the child process must re-import torch after `spawn`. Do any `torch.set_num_threads(1)` / env var setup at the top of the child entrypoint, not in the parent.
 9. **Cloudflare Tunnel does not rewrite the `Host` header for WebSocket upgrade** unless `originRequest.disableChunkedEncoding: false` is set (it is, in the config above). If WS silently 404s, that's the first place to look.
 10. **"Minutes" from the iOS app → `total_timesteps` on the server.** Map `minutes=3` to ~1.5M steps, `minutes=8` to ~4M, using a lookup table rather than a linear formula — throughput varies with track complexity.
 11. **Eval gate uses the same sim as training.** Passing the gate ≠ working on the real car. Treat eval numbers as a smoke test, not a guarantee.
 12. **Progress reward wrap-around.** On the first step after the robot crosses the start/finish line, the arclength projection jumps by `-total_length`. Use the arc-pointer pseudocode in §3 to prevent this (search within a sliding window around the last known idx).
 13. **Do not commit `.env`, `models/`, `$PYSAAC_DATA`, the `.p8` key, or the Cloudflare credentials JSON.** Add to `.gitignore` before the first commit.
-14. **Time estimates in §9 are for the steady state.** First request after server boot pays SAM2 lazy-init (~8 s) and CUDA kernel cache (~3 s). Warm them both at startup so the user never sees cold latency.
+14. **Time estimates in §9 are for the steady state.** First request after server boot pays SAM3 lazy-init (~8 s) and CUDA kernel cache (~3 s). Warm them both at startup so the user never sees cold latency.
 15. **Progress WS reconnection race.** A client that reconnects between the final `progress` row and the `done` event could miss `done`. Always persist the terminal state to `state.json` before closing WS, and have the client GET `/jobs/{id}` on reconnect to catch up.
 
 ---
