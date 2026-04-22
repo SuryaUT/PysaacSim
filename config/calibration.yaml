@@ -6,16 +6,22 @@
 # real robot, find the row here that best describes the mismatch.
 
 ir:
-  # Voltage response of the lab's analog front-end (Sharp GP2Y0A41SK0F + op-amp
-  # + voltage divider). v(d_cm) = curve_k / (d_cm + curve_c) for d >= peak_cm.
+  # Voltage response of the lab's analog front-end.
+  # Model:  v(d_cm) = curve_k / (d_cm + curve_c) + floor_v   (d >= peak_cm)
   #
-  # Defaults make IRDistance_Convert(adc) return 2 x true_mm, matching the
-  # actual robot (firmware's /2 in DAS then recovers true mm). If the op-amp
-  # gain is changed in hardware, rescale curve_k:
-  #   - real robot behavior (2x):  curve_k = 12.79,  curve_c = 0.585
-  #   - bare Sharp datasheet:      curve_k = 25.58,  curve_c = 1.17  (1x out)
-  curve_k: 12.79
-  curve_c: 0.585
+  # Fit from the user's 2026-04-21 measurement (ADC averaged L/R, Vref=3.3,
+  # 12-bit):
+  #    d (cm)     v (V)
+  #     7.62      3.003
+  #    15.24      1.708
+  #    22.86      1.229
+  #    30.48      1.149
+  #    38.10      1.131
+  #    45.72      1.066
+  # 3-param curve_fit → max residual ≈ 0.09 V across the full range.
+  curve_k: 10.7489
+  curve_c: -2.7760
+  floor_v: 0.7879
 
   # Non-monotonic regime boundary. Below this, voltage rises linearly from
   # peak_floor_v at contact up to the curve value at peak_cm.
@@ -24,8 +30,9 @@ ir:
   v_clamp: 3.1          # ADC rails at Vref
 
   # Reported-valid range. Outside this the reading is flagged invalid.
+  # max_cm = 80 matches CAP_IR (800 mm) used to normalize the model input.
   min_cm: 4.0
-  max_cm: 30.0
+  max_cm: 80.0
 
   # Gaussian noise added before ADC conversion / after distance reporting.
   distance_noise_std_cm: 0.4
@@ -35,7 +42,10 @@ ir:
   adc_vref: 3.3
 
 lidar:
-  max_cm: 800.0         # TF-Luna spec: 8 m max
+  # Capped to 1 m (matches CAP_TFLUNA = 1000 mm). TF-Luna hardware spec is 8 m,
+  # but the sim and model both treat 1 m as the reportable range for
+  # wall-following — anything further is normalized to 1.0 and clipped.
+  max_cm: 100.0
   # Measured: avg 163 mm, stdev 0.56 mm → 0.056 cm (SNR 291, 24.64 dB power).
   noise_std_cm: 0.056
   fov_rad: 0.0349       # ~2 deg (modeled as a single ray — FOV unused for now)

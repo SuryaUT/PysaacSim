@@ -307,13 +307,18 @@ class RobotEnv(gym.Env):
 
         if self._ep_direction == 0 and abs(self._lap_progress) > 0.05:
             self._ep_direction = 1 if self._lap_progress > 0 else -1
-        direction = self._ep_direction or 1
 
-        lap_r = float(d_angle) * direction * (20.0 / (2.0 * np.pi))
-
-        speed_frac = max(0.0, self._state.v) / MAX_SPEED_CMS
-        progressing = 1.0 if d_angle * direction > 0 else 0.0
-        speed_r = 0.2 * speed_frac * progressing
+        # Zero lap and speed reward until direction is locked — keeps the
+        # first decisive-motion window fully symmetric between CCW and CW.
+        if self._ep_direction == 0:
+            lap_r = 0.0
+            speed_r = 0.0
+        else:
+            direction = self._ep_direction
+            lap_r = float(d_angle) * direction * (20.0 / (2.0 * np.pi))
+            speed_frac = max(0.0, self._state.v) / MAX_SPEED_CMS
+            progressing = 1.0 if d_angle * direction > 0 else 0.0
+            speed_r = 0.2 * speed_frac * progressing
 
         min_dist = min(
             sensors["lidar"]["center"]["distance_cm"],

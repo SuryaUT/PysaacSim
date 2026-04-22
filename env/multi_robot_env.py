@@ -156,13 +156,18 @@ class MultiRobotVecEnv(VecEnv):
 
         if self._ep_direction[i] == 0 and abs(self._lap_progress[i]) > 0.05:
             self._ep_direction[i] = 1 if self._lap_progress[i] > 0 else -1
-        direction = self._ep_direction[i] or 1
 
-        lap_r = float(d) * direction * (20.0 / (2.0 * np.pi))
-
-        speed_frac = max(0.0, s.v) / MAX_SPEED_CMS
-        progressing = 1.0 if d * direction > 0 else 0.0
-        speed_r = 0.2 * speed_frac * progressing
+        # Zero lap and speed reward until direction is locked — keeps the
+        # first decisive-motion window fully symmetric between CCW and CW.
+        if self._ep_direction[i] == 0:
+            lap_r = 0.0
+            speed_r = 0.0
+        else:
+            direction = self._ep_direction[i]
+            lap_r = float(d) * direction * (20.0 / (2.0 * np.pi))
+            speed_frac = max(0.0, s.v) / MAX_SPEED_CMS
+            progressing = 1.0 if d * direction > 0 else 0.0
+            speed_r = 0.2 * speed_frac * progressing
 
         min_dist = min(
             sensors["lidar"]["center"]["distance_cm"],

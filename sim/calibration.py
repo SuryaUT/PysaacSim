@@ -30,12 +30,13 @@ _DEFAULT_YAML = Path(__file__).resolve().parent.parent / "config" / "calibration
 
 @dataclass
 class IRCalibration:
-    # v(d_cm) = curve_k / (d_cm + curve_c) for d_cm >= peak_cm.
-    # Defaults reproduce the Lab 7 analog front-end doubling: IRDistance_Convert
-    # returns 2 x true_mm, and firmware /2 in DAS recovers true mm. Change
-    # curve_k (e.g., to 25.58) if the hardware response changes.
+    # v(d_cm) = curve_k / (d_cm + curve_c) + floor_v  for d_cm >= peak_cm.
+    # `floor_v` is the op-amp / sensor DC offset the voltage asymptotes to at
+    # long distances. If the fit doesn't need a floor, leave at 0.0 and it
+    # behaves as the classic 2-parameter Sharp response curve.
     curve_k: float = 12.79
     curve_c: float = 0.585
+    floor_v: float = 0.0
     peak_cm: float = 4.0
     peak_floor_v: float = 0.4
     v_clamp: float = 3.1
@@ -110,10 +111,10 @@ def ir_distance_to_volts(d_cm: float, cal: IRCalibration) -> float:
     ~25 cm object); model that regime as a linear rise from peak_floor_v at
     d=0 up to the rational-curve value at peak_cm.
     """
-    peak_v = cal.curve_k / (cal.peak_cm + cal.curve_c)
+    peak_v = cal.curve_k / (cal.peak_cm + cal.curve_c) + cal.floor_v
     clamped_peak = min(cal.v_clamp, peak_v)
     if d_cm < cal.peak_cm:
         t = d_cm / cal.peak_cm
         return cal.peak_floor_v + (clamped_peak - cal.peak_floor_v) * t
-    v = cal.curve_k / (d_cm + cal.curve_c)
+    v = cal.curve_k / (d_cm + cal.curve_c) + cal.floor_v
     return max(0.0, min(cal.v_clamp, v))

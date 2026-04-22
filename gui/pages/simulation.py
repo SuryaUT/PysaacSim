@@ -276,11 +276,11 @@ class SimulationPage(QWidget):
         lay.addLayout(grid)
 
         row2 = QHBoxLayout()
-        self.chk_respawn = QCheckBox("Auto-respawn RL robots on crash")
+        self.chk_respawn = QCheckBox("Auto-respawn on crash")
         self.chk_respawn.setChecked(True)
         self.chk_respawn.setToolTip(
-            "When an 'rl'-controlled robot collides, reset it to its spawn "
-            "pose so you can keep watching the policy act."
+            "When a robot collides, reset it to its spawn pose so it keeps "
+            "running. Applies to all controllers (RL, PD, C, manual)."
         )
         row2.addWidget(self.chk_respawn)
         row2.addStretch(1)
@@ -573,12 +573,12 @@ class SimulationPage(QWidget):
                              dims.chassis_width_cm, dt)
                 if state.collided:
                     break
-            # Auto-respawn RL robots on crash so the policy keeps running.
-            if (state.collided and r.controller_id == "rl"
-                    and self.chk_respawn.isChecked()):
+            # Auto-respawn on crash so the robot keeps running.
+            if state.collided and self.chk_respawn.isChecked():
                 self._runtimes[r.id] = initial_robot(r.x, r.y, r.theta)
                 self._steps_since_ctrl[r.id] = 0.0
-                self._reset_rl_state(r.id)
+                if r.controller_id == "rl":
+                    self._reset_rl_state(r.id)
                 state = self._runtimes[r.id]
             # Push to canvas visuals.
             item = self.canvas._robot_items.get(r.id)
