@@ -6,6 +6,7 @@
  * maps world coordinates to canvas pixels with a fixed margin.
  */
 'use strict';
+console.log('[sim.js] v20260423 loaded');
 
 (function () {
 
@@ -22,7 +23,10 @@ const ctx    = canvas.getContext('2d');
 let selectedRobotId = null;
 let dragMode = null; // 'move', 'rotate', null
 let dragStart = null;
+
+// --- Playback controls -------------------------------------------------------
 let playing = true;
+let timeScale = 1.0;
 
 // Keyboard drive state
 const keys = {};
@@ -52,9 +56,17 @@ function connectSimWS() {
     startDriveLoop();
   };
 
-  ws.onmessage = e => {
-    try { handleSimMsg(JSON.parse(e.data)); }
-    catch (_) {}
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.kind && msg.kind.startsWith('training_')) {
+          if (window.handleLiveTrainingMsg) window.handleLiveTrainingMsg(msg);
+          return;
+      }
+      if (msg.kind === 'sim') {
+        handleSimMsg(msg);
+      }
+    } catch (err) {}
   };
 
   ws.onclose = (ev) => {
@@ -295,7 +307,10 @@ const btnPlay = document.getElementById('btn-sim-play');
 btnPlay.addEventListener('click', () => {
     playing = !playing;
     btnPlay.innerHTML = playing ? '&#10074;&#10074; Pause' : '&#9654; Play';
-    updatePlayback({ time_scale: playing ? parseFloat(document.getElementById('sim-speed').value) : 0.0 });
+    updatePlayback({ 
+      time_scale: playing ? parseFloat(document.getElementById('sim-speed').value) : 0.0,
+      playing: playing
+    });
 });
 
 document.getElementById('btn-sim-reset').addEventListener('click', resetPlayback);

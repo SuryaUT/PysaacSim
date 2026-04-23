@@ -48,6 +48,9 @@ class WebManualController(AbstractController):
     def __init__(self):
         self.cmd = MotorCommand()
         
+    def init(self) -> None:
+        self.cmd = MotorCommand()
+        
     def tick(self, sensors: dict, t_ms: float) -> MotorCommand:
         return self.cmd
         
@@ -74,8 +77,12 @@ class SimRunner:
         self._next_robot_id = 0
 
         self._running: bool = False
+        self.playing: bool = True
         self._task: Optional[asyncio.Task[None]] = None
         self._lock = asyncio.Lock()
+        self._loop = None
+        self._train_thread = None
+        self._stop_training = False
         
         # Setup the default web keyboard controller
         self.web_manual = WebManualController()
@@ -110,6 +117,7 @@ class SimRunner:
 
     def start(self) -> None:
         if self._task is None:
+            self._loop = asyncio.get_running_loop()
             self._running = True
             self._task = asyncio.create_task(self._run())
 
@@ -220,15 +228,25 @@ class SimRunner:
     async def _run(self) -> None:
         # 50 Hz control: 20 ms per tick
         ctrl_dt_s = 0.02
+        print(f"[SimRunner] _run() started. playing={self.playing}, robots={len(self.robots)}, running={self._running}", flush=True)
+        frame_count = 0
         try:
             while self._running:
-                if self._broadcaster.client_count() > 0:
-                    async with self._lock:
-                        self.engine.controllers = self.controllers
-                        # Perform exactly 1 frame of physics at 50Hz (scaled by time_scale)
-                        self.engine.tick_hz(int(1.0 / ctrl_dt_s), self.robots, self._walls, self._dims, self._cal)
-                        payload = self._snapshot_msg()
-                    await self._broadcaster.broadcast(json.dumps(payload, separators=(",", ":")))
+                clients = self._broadcaster.client_count()
+                if clients > 0:
+                    try:
+                        async with self._lock:
+                            if self.playing:
+                                self.engine.controllers = self.controllers
+                                self.engine.tick_hz(int(1.0 / ctrl_dt_s), self.robots, self._walls, self._dims, self._cal)
+                            payload = self._snapshot_msg()
+                        await self._broadcaster.broadcast(json.dumps(payload, separators=(",", ":")))
+                        frame_count += 1
+                        if frame_count <= 2 or frame_count % 1000 == 0:
+                            print(f"[SimRunner] frame {frame_count} → {clients} clients, {len(payload.get('robots',[]))} robots", flush=True)
+                    except Exception as e:
+                        print(f"[SimRunner] ERROR in loop body: {e}", flush=True)
+                        import traceback; traceback.print_exc()
                 await asyncio.sleep(ctrl_dt_s)
         except asyncio.CancelledError:
             raise
@@ -270,3 +288,152 @@ class SimRunner:
             "kind": "sim",
             "robots": robots_data,
         }
+
+    # ---- live training ----------------------------------------------------
+
+    def start_live_training(self, total_timesteps: int, lr: float, device: str, n_envs: int, same_scene: bool, save_path: str, resume: bool, save_every: int) -> None:
+        if self._train_thread is not None and self._train_thread.is_alive():
+            return
+        self._stop_training = False
+        import threading
+        self._train_thread = threading.Thread(
+            target=self._live_train_thread_func,
+            args=(total_timesteps, lr, device, n_envs, same_scene, save_path, resume, save_every),
+            daemon=True
+        )
+        self._train_thread.start()
+
+    def stop_live_training(self) -> None:
+        self._stop_training = True
+
+    def _live_train_thread_func(self, total_timesteps, lr, device, n_envs, same_scene, save_path, resume, save_every):
+        import time
+        import numpy as np
+        from pathlib import Path
+        try:
+            from stable_baselines3 import PPO
+            from stable_baselines3.common.callbacks import BaseCallback
+            from stable_baselines3.common.monitor import Monitor
+            from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
+            from ..env.robot_env import RobotEnv
+        except Exception as e:
+            asyncio.run_coroutine_threadsafe(self._broadcaster.broadcast(json.dumps({
+                "kind": "training_state", "state": "failed", "error": f"Import error: {e}"
+            })), self._loop)
+            return
+
+        walls = list(self._walls)
+        cal = self._cal.copy() if hasattr(self._cal, 'copy') else self._cal
+        
+        def _make_env():
+            e = RobotEnv(calibration=cal, max_episode_steps=1500)
+            e._world["walls"] = walls
+            e._walls = walls
+            return Monitor(e)
+
+        if same_scene and n_envs > 1:
+            from ..env.multi_robot_env import MultiRobotVecEnv
+            env = MultiRobotVecEnv(n_agents=n_envs, walls=walls, calibration=cal, max_episode_steps=1500)
+            env = VecMonitor(env)
+        else:
+            if n_envs == 1:
+                env = _make_env()
+            else:
+                env = DummyVecEnv([(lambda: _make_env()) for _ in range(n_envs)])
+
+        runner = self
+        
+        class ProgressCb(BaseCallback):
+            def __init__(self):
+                super().__init__()
+                self._t0 = time.time()
+                self._next_save = save_every if (save_path and save_every > 0) else None
+                
+            def _on_step(self) -> bool:
+                if runner._stop_training:
+                    return False
+                if self._next_save is not None and self.num_timesteps >= self._next_save:
+                    try:
+                        self.model.save(save_path)
+                        asyncio.run_coroutine_threadsafe(runner._broadcaster.broadcast(json.dumps({
+                            "kind": "training_log", "msg": f"[checkpoint] saved @ {self.num_timesteps} steps"
+                        })), runner._loop)
+                    except Exception:
+                        pass
+                    self._next_save += save_every
+                return True
+
+            def _on_rollout_end(self) -> None:
+                from ..gui.training.linear_policy import extract_weights, policy_forward
+                W, b = extract_weights(self.model)
+                
+                def live_policy(obs):
+                    return policy_forward(W, b, obs)
+                
+                async def _update():
+                    async with runner._lock:
+                        runner.engine.rl_policy = live_policy
+                asyncio.run_coroutine_threadsafe(_update(), runner._loop)
+                
+                ep_buf = self.model.ep_info_buffer
+                mean_r = float(np.mean([ep["r"] for ep in ep_buf])) if ep_buf else 0.0
+                fps = self.num_timesteps / max(1e-6, time.time() - self._t0)
+                
+                asyncio.run_coroutine_threadsafe(runner._broadcaster.broadcast(json.dumps({
+                    "kind": "training_progress",
+                    "step": int(self.num_timesteps),
+                    "mean_reward": mean_r,
+                    "fps": fps
+                })), runner._loop)
+                
+                asyncio.run_coroutine_threadsafe(runner._broadcaster.broadcast(json.dumps({
+                    "kind": "training_weights",
+                    "W": W.tolist(),
+                    "b": b.tolist()
+                })), runner._loop)
+
+        asyncio.run_coroutine_threadsafe(self._broadcaster.broadcast(json.dumps({
+            "kind": "training_state", "state": "running"
+        })), self._loop)
+
+        model = None
+        if resume and save_path:
+            p = Path(save_path).with_suffix(".zip")
+            if p.exists():
+                try:
+                    model = PPO.load(str(save_path), env=env, device=device)
+                    model.learning_rate = lr
+                    model._setup_lr_schedule()
+                    asyncio.run_coroutine_threadsafe(self._broadcaster.broadcast(json.dumps({
+                        "kind": "training_log", "msg": f"Resuming from {p}"
+                    })), self._loop)
+                except Exception as e:
+                    model = None
+        
+        if model is None:
+            model = PPO("MlpPolicy", env, n_steps=512, batch_size=64, learning_rate=lr, 
+                        policy_kwargs=dict(net_arch=[]), device=device, verbose=0)
+            asyncio.run_coroutine_threadsafe(self._broadcaster.broadcast(json.dumps({
+                "kind": "training_log", "msg": f"Constructing new linear policy PPO..."
+            })), self._loop)
+
+        if save_path:
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            model.learn(total_timesteps=total_timesteps, callback=ProgressCb(), reset_num_timesteps=not resume)
+            if save_path:
+                model.save(save_path)
+            state = "stopped" if self._stop_training else "done"
+        except Exception as e:
+            asyncio.run_coroutine_threadsafe(self._broadcaster.broadcast(json.dumps({
+                "kind": "training_log", "msg": f"Training error: {e}"
+            })), self._loop)
+            state = "failed"
+        finally:
+            env.close()
+
+        asyncio.run_coroutine_threadsafe(self._broadcaster.broadcast(json.dumps({
+            "kind": "training_state", "state": state
+        })), self._loop)
+

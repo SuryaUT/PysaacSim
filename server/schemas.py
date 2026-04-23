@@ -145,4 +145,15 @@ class PlaybackBody(BaseModel):
     time_scale: Optional[float] = None
     cars_interact: Optional[bool] = None
     auto_respawn: Optional[bool] = None
+    playing: Optional[bool] = None
+
+class LiveTrainingStartBody(BaseModel):
+    total_timesteps: int = 200000
+    learning_rate: float = 3e-4
+    device: str = "cpu"
+    n_envs: int = 4
+    same_scene: bool = False
+    save_path: str = "checkpoints/wall_follower_ppo"
+    resume: bool = False
+    save_every: int = 50000
 

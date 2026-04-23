@@ -97,6 +97,17 @@ input[type="text"], input[type="number"], select {
 /* ---- canvases ---- */
 canvas { background: #fff; border: 1px solid var(--border); box-shadow: inset 0 0 5px rgba(0,0,0,0.05); }
 
+/* Fix flex container expansion loop */
+#sim-canvas-wrap, #track-canvas-wrap, #robot-canvas-wrap {
+  min-width: 0;
+  min-height: 0;
+}
+#sim-canvas, #track-canvas, #robot-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 /* ---- misc specific layout tweaks ---- */
 .row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
 .col { display: flex; flex-direction: column; }

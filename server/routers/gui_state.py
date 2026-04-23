@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from ..auth import User, current_user
 from ..schemas import (
     ControllerCompileBody, ControllerCompileResponse,
-    RobotSpawnBody, RobotPatchBody, PlaybackBody
+    RobotSpawnBody, RobotPatchBody, PlaybackBody, LiveTrainingStartBody
 )
 from ...sim.geometry import Segment, Vec2
 from ...sim.calibration import SensorCalibration
@@ -91,12 +91,37 @@ async def post_playback(body: PlaybackBody, request: Request, user: User = Depen
             runner.engine.cars_interact = body.cars_interact
         if body.auto_respawn is not None:
             runner.engine.auto_respawn = body.auto_respawn
+        if body.playing is not None:
+            runner.playing = body.playing
     return {"status": "ok"}
 
 @router.post("/playback/reset")
 async def post_playback_reset(request: Request, user: User = Depends(current_user)) -> dict:
     runner = request.app.state.sim_runner
     await runner.reset()
+    return {"status": "ok"}
+
+# --- Live Training ---
+
+@router.post("/training/start")
+async def start_training(body: LiveTrainingStartBody, request: Request, user: User = Depends(current_user)) -> dict:
+    runner = request.app.state.sim_runner
+    runner.start_live_training(
+        total_timesteps=body.total_timesteps,
+        lr=body.learning_rate,
+        device=body.device,
+        n_envs=body.n_envs,
+        same_scene=body.same_scene,
+        save_path=body.save_path,
+        resume=body.resume,
+        save_every=body.save_every
+    )
+    return {"status": "ok"}
+
+@router.post("/training/stop")
+async def stop_training(request: Request, user: User = Depends(current_user)) -> dict:
+    runner = request.app.state.sim_runner
+    runner.stop_live_training()
     return {"status": "ok"}
 
 # --- Robots CRUD ---

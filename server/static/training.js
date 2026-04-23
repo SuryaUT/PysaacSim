@@ -3,6 +3,7 @@
  * the reward curve with Chart.js, handles cancel + policy load.
  */
 'use strict';
+console.log('[training.js] v20260423 loaded');
 
 (function () {
 
@@ -77,95 +78,84 @@ function setStats({ step, reward, fps, state }) {
 }
 
 // --- Job WS ---------------------------------------------------------------
-function openJobWS(jobId) {
-  if (jobWs) { try { jobWs.close(); } catch (_) {} }
-  const jwt = getJWT();
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const url = `${proto}://${location.host}/jobs/${jobId}/events?token=${encodeURIComponent(jwt)}`;
-  jobWs = new WebSocket(url);
-
-  jobWs.onopen  = () => pysaac.log(`Job WS ${jobId.slice(0,8)}… connected`, 'ok');
-  jobWs.onclose = (ev) => pysaac.log(`Job WS closed (${ev.code})`);
-  jobWs.onmessage = (e) => {
-    try { handleJobMsg(jobId, JSON.parse(e.data)); }
-    catch (_) {}
-  };
-}
-
-function handleJobMsg(jobId, msg) {
+window.handleLiveTrainingMsg = function(msg) {
   switch (msg.kind) {
-    case 'progress':
+    case 'training_progress':
       pushRewardPoint(msg.step, msg.mean_reward);
       setStats({ step: msg.step, reward: msg.mean_reward, fps: msg.fps });
       break;
 
-    case 'state':
+    case 'training_state':
       setStats({ state: msg.state });
-      pysaac.log(`Job state → ${msg.state}`, msg.state === 'failed' ? 'err' : 'info');
+      pysaac.log(`Training state → ${msg.state}`, msg.state === 'failed' ? 'err' : 'info');
       if (msg.state !== 'running') setJobInFlight(false);
+      if (msg.state === 'done') {
+        document.getElementById('btn-load-policy').disabled = false;
+        pysaac.log('Training complete!', 'ok');
+      }
       break;
 
-    case 'done': {
-      setStats({ state: 'done' });
-      setJobInFlight(false);
-      window._lastJobId = jobId;
-      document.getElementById('btn-load-policy').disabled = false;
-      const evalCard = document.getElementById('eval-card');
-      evalCard.classList.add('visible');
-      document.getElementById('eval-pre').textContent = JSON.stringify(msg.eval, null, 2);
-      pysaac.log('Training done! Eval: ' + JSON.stringify(msg.eval), 'ok');
+    case 'training_log':
+      pysaac.log(`Training: ${msg.msg}`, 'info');
       break;
-    }
 
-    case 'error':
-      pysaac.log(`Job error: ${msg.code}: ${msg.message}`, 'err');
-      setStats({ state: 'failed' });
-      setJobInFlight(false);
+    case 'training_weights':
+      // Currently weights are automatically applied to the engine.
+      // We could add a visual heatmap here in the future.
       break;
 
     default: break;
   }
-}
+};
 
 // --- UI helpers ------------------------------------------------------------
 function setJobInFlight(inFlight) {
-  document.getElementById('btn-start').disabled = inFlight;
-  document.getElementById('btn-stop').disabled  = !inFlight;
+  document.getElementById('btn-start').style.display = inFlight ? 'none' : '';
+  document.getElementById('btn-stop').style.display  = inFlight ? '' : 'none';
 }
 
 // --- Public API (called from index.html onclick) ---------------------------
 window.startJob = async function startJob() {
-  const trackId = "live";
   const totalSteps = parseInt(document.getElementById('f-steps').value, 10);
   const nEnvs   = parseInt(document.getElementById('f-n-envs').value, 10);
   const lr      = parseFloat(document.getElementById('f-lr').value);
+  const device  = document.getElementById('f-device').value;
+  const sameScene = document.getElementById('f-same-scene').checked;
+  const savePath = document.getElementById('f-save-path').value;
+  // const resume = document.getElementById('f-resume')?.checked || false;
+  // const saveEvery = parseInt(document.getElementById('f-save-every')?.value || '50000', 10);
   const jwt     = getJWT();
 
   if (!jwt) { pysaac.log('No JWT — reload page and enter token', 'err'); return; }
 
   resetChart();
   document.getElementById('eval-card')?.classList.remove('visible');
-  setStats({ step: 0, reward: 0, fps: 0, state: 'submitting…' });
+  setStats({ step: 0, reward: 0, fps: 0, state: 'starting…' });
   setJobInFlight(true);
-  pysaac.log(`Submitting job: track=live, steps=${totalSteps}, n_envs=${nEnvs}`);
+  pysaac.log(`Starting live training: steps=${totalSteps}, n_envs=${nEnvs}`);
 
   try {
-    const r = await fetch('/jobs/train', {
+    const r = await fetch('/gui/training/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + jwt },
-      body: JSON.stringify({ track_id: trackId, total_timesteps: totalSteps, n_envs: nEnvs, learning_rate: lr }),
+      body: JSON.stringify({ 
+          total_timesteps: totalSteps, 
+          n_envs: nEnvs, 
+          learning_rate: lr,
+          device: device,
+          same_scene: sameScene,
+          save_path: savePath,
+          resume: false,
+          save_every: 50000
+      }),
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({ detail: r.statusText }));
-      pysaac.log('Submit failed: ' + (err.detail || r.status), 'err');
+      pysaac.log('Start failed: ' + (err.detail || r.status), 'err');
       setJobInFlight(false);
       return;
     }
-    const job = await r.json();
-    window._lastJobId = job.job_id;
-    setStats({ state: job.state });
-    pysaac.log(`Job queued: ${job.job_id}`, 'info');
-    openJobWS(job.job_id);
+    pysaac.log('Live training started.', 'info');
   } catch (e) {
     pysaac.log('Network error: ' + e, 'err');
     setJobInFlight(false);
@@ -173,21 +163,21 @@ window.startJob = async function startJob() {
 };
 
 window.cancelJob = async function cancelJob() {
-  const jobId = window._lastJobId;
-  if (!jobId) return;
   const jwt = getJWT();
   try {
-    const r = await fetch(`/jobs/${jobId}`, {
-      method: 'DELETE', headers: { Authorization: 'Bearer ' + jwt },
+    const r = await fetch('/gui/training/stop', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + jwt },
     });
-    const body = await r.json().catch(() => ({}));
-    pysaac.log(`Cancel → ${body.state || r.status}`, 'info');
+    pysaac.log(`Stop training requested`, 'info');
   } catch (e) {
-    pysaac.log('Cancel error: ' + e, 'err');
+    pysaac.log('Stop error: ' + e, 'err');
   }
 };
 
 // Init chart eagerly so it renders in the correct panel size.
-window.addEventListener('load', () => setTimeout(initChart, 100));
+window.addEventListener('load', () => {
+  setTimeout(initChart, 100);
+  setJobInFlight(false);
+});
 
 })();

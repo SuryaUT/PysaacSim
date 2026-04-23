@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>PySaac Sim</title>
-  <link rel="stylesheet" href="style.css?v=3" />
+  <link rel="stylesheet" href="style.css?v=4" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -97,11 +97,16 @@
           <div class="row" style="margin-top:8px;">
             <button class="btn" style="flex:1;" id="btn-start" onclick="startJob()">Start Training</button>
             <button class="btn" style="flex:1;" onclick="loadPolicyIntoSim()">Use current weights on RL robots</button>
-            <button class="btn danger" style="display:none;" id="btn-stop" onclick="cancelJob()">Stop</button>
+            <button class="btn danger" id="btn-stop" onclick="cancelJob()">Stop</button>
           </div>
-          <div style="font-size:10px; color:#666; margin:4px 0;" id="ts-state">Ready</div>
-          <textarea class="term" style="width:100%; height:80px; background:#fff; color:#000; border:1px solid var(--border);" id="eval-pre"></textarea>
+          <div class="row" style="font-size:10px; color:#aaa; margin:4px 0; gap:10px;">
+            <span>Step: <b id="ts-step">0</b></span>
+            <span>Reward: <b id="ts-reward">0.000</b></span>
+            <span>FPS: <b id="ts-fps">0</b></span>
+            <span id="ts-state" style="margin-left:auto;">Ready</span>
+          </div>
           <div style="height:120px; border:1px solid var(--border); margin-top:4px;"><canvas id="reward-chart"></canvas></div>
+          <div id="eval-card" style="display:none;"><textarea class="term" style="width:100%; height:80px; background:#fff; color:#000; border:1px solid var(--border);" id="eval-pre"></textarea></div>
         </div>
 
       </div>
@@ -234,10 +239,10 @@ perim. : 0 cm</pre>
 
 </div>
 
-<script src="sim.js?v=2"></script>
-<script src="training.js?v=2"></script>
-<script src="track_builder.js"></script>
-<script src="robot_builder.js"></script>
+<script src="sim.js?v=20260423"></script>
+<script src="training.js?v=20260423"></script>
+<script src="track_builder.js?v=20260423"></script>
+<script src="robot_builder.js?v=20260423"></script>
 
 <script>
   function setTab(tab) {
