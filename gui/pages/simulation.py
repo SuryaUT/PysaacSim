@@ -42,10 +42,12 @@ from ..widgets.mpl_canvas import RewardCurve, WeightHeatmap
 CTRL_PERIOD_MS = 80.0
 PHYSICS_HZ = 60  # how often the GUI timer fires
 
+
 class SimulationPage(QWidget):
     def __init__(self, state: AppState):
         super().__init__()
         self.state = state
+        self._runtimes: dict[int, RobotState] = {}  # robot_id -> live state
         self._selected_robot: Optional[int] = None
         self._worker: Optional[TrainingWorker] = None
         self._W: Optional[np.ndarray] = None
@@ -377,7 +379,7 @@ class SimulationPage(QWidget):
                     self.robot_list.setCurrentRow(i)
                     break
         self.robot_list.blockSignals(False)
-        self.engine.ensure_runtimes(self.state.robots)
+        self._prune_runtimes()
 
     def _refresh_controller_choices(self) -> None:
         current = self.ctrl_combo.currentText() or "manual-drive"
@@ -440,14 +442,10 @@ class SimulationPage(QWidget):
         if rid == self._selected_robot:
             self._sync_selected_spinboxes()
         # Running state stays in sync: snap live runtime to the new spawn.
-<<<<<<< HEAD
-        self.engine.force_robot_pose(rid, x, y, theta)
-=======
         if rid in self._runtimes:
             self._runtimes[rid] = initial_robot(x, y, theta)
             self._steps_since_ctrl[rid] = 0.0
             self._reset_rl_state(rid)
->>>>>>> origin/main
 
     def _on_sel_edited(self) -> None:
         if self._selected_robot is None:
@@ -464,16 +462,12 @@ class SimulationPage(QWidget):
         if item is not None:
             item.setPos(self.sel_x.value(), self.sel_y.value())
             item.setRotation(self.sel_theta.value())
-<<<<<<< HEAD
-        self.engine.force_robot_pose(rid, self.sel_x.value(), self.sel_y.value(), math.radians(self.sel_theta.value()))
-=======
         if rid in self._runtimes:
             self._runtimes[rid] = initial_robot(
                 self.sel_x.value(), self.sel_y.value(),
                 math.radians(self.sel_theta.value()))
             self._steps_since_ctrl[rid] = 0.0
             self._reset_rl_state(rid)
->>>>>>> origin/main
 
     def _on_ring_angle(self, rid: int, theta: float) -> None:
         self.state.update_robot(rid, theta=theta)
@@ -481,16 +475,12 @@ class SimulationPage(QWidget):
         item = self.canvas._robot_items.get(rid)
         if item is not None:
             item.setRotation(math.degrees(theta))
-        if rid in self.engine.runtimes:
+        if rid in self._runtimes:
             spec = next((r for r in self.state.robots if r.id == rid), None)
             if spec is not None:
-<<<<<<< HEAD
-                self.engine.force_robot_pose(rid, spec.x, spec.y, theta)
-=======
                 self._runtimes[rid] = initial_robot(spec.x, spec.y, theta)
                 self._steps_since_ctrl[rid] = 0.0
                 self._reset_rl_state(rid)
->>>>>>> origin/main
         self.canvas.sync_ring_to_selected()
 
     def _rotate_selected(self, direction: int) -> None:
@@ -509,15 +499,10 @@ class SimulationPage(QWidget):
         item = self.canvas._robot_items.get(spec.id)
         if item is not None:
             item.setRotation(math.degrees(new_theta))
-<<<<<<< HEAD
-        if spec.id in self.engine.runtimes:
-            self.engine.force_robot_pose(spec.id, spec.x, spec.y, new_theta)
-=======
         if spec.id in self._runtimes:
             self._runtimes[spec.id] = initial_robot(spec.x, spec.y, new_theta)
             self._steps_since_ctrl[spec.id] = 0.0
             self._reset_rl_state(spec.id)
->>>>>>> origin/main
 
     # ---- sim loop --------------------------------------------------------
 
@@ -527,18 +512,12 @@ class SimulationPage(QWidget):
             self._running = False
             self.btn_play.setText("▶ Play")
             return
-        self.engine.ensure_runtimes(self.state.robots)
+        self._ensure_runtimes()
         self._timer.start(int(1000 / PHYSICS_HZ))
         self._running = True
         self.btn_play.setText("⏸ Pause")
 
     def _reset_runtimes(self) -> None:
-<<<<<<< HEAD
-        self.engine.reset_runtimes(self.state.robots)
-        self.canvas._rebuild_robots()  # snap visuals back
-        self._update_telemetry()
-
-=======
         self._runtimes = {}
         self._steps_since_ctrl = {}
         self._rl_state = {}
@@ -560,28 +539,18 @@ class SimulationPage(QWidget):
                 self._steps_since_ctrl.pop(rid, None)
                 self._rl_state.pop(rid, None)
 
->>>>>>> origin/main
     def _tick(self) -> None:
-        self.engine.time_scale = self._time_scale
-        self.engine.cars_interact = self.chk_cars_interact.isChecked()
-        self.engine.auto_respawn = self.chk_respawn.isChecked()
-        self.engine.controllers = self.state.controllers
-        
-        # Pass linear policy evaluation if W and b are set
-        if self._W is not None and self._b is not None:
-            self.engine.rl_policy = lambda obs: policy_forward(self._W, self._b, obs)
-        else:
-            self.engine.rl_policy = None
+        self._ensure_runtimes()
+        walls = self.state.walls
+        cal = self.state.calibration
+        dims = self.state.dims
+        dt = PHYSICS_DT_S
+        # Simulate (1 / PHYSICS_HZ) seconds of wall-clock per tick, scaled.
+        sim_seconds = self._time_scale / PHYSICS_HZ
+        n_phys = max(1, int(round(sim_seconds / dt)))
 
-        self.engine.tick_hz(PHYSICS_HZ, self.state.robots, self.state.walls, 
-                            self.state.dims, self.state.calibration)
-
-        # Push to canvas visuals.
+        cars_interact = self.chk_cars_interact.isChecked()
         for r in self.state.robots:
-<<<<<<< HEAD
-            state = self.engine.runtimes.get(r.id)
-            if state is None: continue
-=======
             state = self._runtimes[r.id]
             # When cars_interact: other cars' chassis edges act as dynamic wall
             # segments so this robot both SEES them (lidar/IR rays) and COLLIDES
@@ -612,7 +581,6 @@ class SimulationPage(QWidget):
                     self._reset_rl_state(r.id)
                 state = self._runtimes[r.id]
             # Push to canvas visuals.
->>>>>>> origin/main
             item = self.canvas._robot_items.get(r.id)
             if item is not None:
                 item.setPos(state.pose.x, state.pose.y)
@@ -620,8 +588,6 @@ class SimulationPage(QWidget):
         self.canvas.sync_ring_to_selected()
         self._update_telemetry()
 
-<<<<<<< HEAD
-=======
     def _other_car_segments(self, me_id: int, dims) -> list:
         """Chassis segments of every other live robot, in world frame.
         These become obstacles for this robot's sensors and physics."""
@@ -703,7 +669,6 @@ class SimulationPage(QWidget):
         cmd = ctrl.tick(sensors, 0.0)
         return cmd.duty_l, cmd.duty_r, cmd.servo
 
->>>>>>> origin/main
     def _update_telemetry(self) -> None:
         if self._selected_robot is None:
             self.telemetry.setPlainText("(no robot selected — click on one in the list or track)")
@@ -712,7 +677,7 @@ class SimulationPage(QWidget):
         if spec is None:
             self.telemetry.setPlainText("(selection invalid)")
             return
-        state = self.engine.runtimes.get(self._selected_robot)
+        state = self._runtimes.get(self._selected_robot)
         from ...sim.physics import Pose
         pose = state.pose if state is not None else Pose(spec.x, spec.y, spec.theta)
         v    = state.v if state is not None else 0.0
@@ -720,9 +685,12 @@ class SimulationPage(QWidget):
         steer = state.steer_angle if state is not None else 0.0
         collided = state.collided if state is not None else False
         try:
-            sensors = self.engine.last_sensors.get(spec.id, {})
-            if not sensors:
-                return # No telemetry yet
+            if self.chk_cars_interact.isChecked():
+                other_walls = self._other_car_segments(spec.id, self.state.dims)
+                eff_walls = self.state.walls + other_walls
+            else:
+                eff_walls = self.state.walls
+            sensors = sample_sensors(eff_walls, pose, self.state.calibration)
         except Exception as e:
             self.telemetry.setPlainText(f"(sensor sample failed: {e})")
             return
